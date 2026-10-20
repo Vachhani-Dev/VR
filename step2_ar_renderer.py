@@ -90,6 +90,7 @@ from OpenGL.GL import (
     glPopMatrix,
     glPushMatrix,
     glRotatef,
+    glScalef,
     glShadeModel,
     glTexCoord2f,
     glTexImage2D,
@@ -244,6 +245,15 @@ def draw_pyramid() -> None:
     glEnd()
 
 
+# Preset AR anchor positions: (label, x, y, z) — defaults to Right Side so user's face stays clear
+DOCK_POSITIONS: List[Tuple[str, float, float, float]] = [
+    ("Right Side", 1.75, 0.15, -6.0),
+    ("Left Side", -1.75, 0.15, -6.0),
+    ("Top-Right", 1.95, 0.80, -6.2),
+    ("Center", 0.00, 0.00, -5.8),
+]
+
+
 # ---------------------------------------------------------------------------
 # OpenGL Renderer (2D Webcam Texture + 3D AR Scene)
 # ---------------------------------------------------------------------------
@@ -259,6 +269,11 @@ class AeroTouchRenderer:
         self.lighting_index: int = 0               # [L] cycles presets
         self.shape_mode: str = "CUBE"              # [S] toggles CUBE <-> PYRAMID
         self.auto_rotate: bool = True              # [SPACE] pauses/resumes
+
+        # 3D placement & scale (default: docked neatly on Right Side of frame)
+        self.dock_index: int = 0
+        _, self.pos_x, self.pos_y, self.pos_z = DOCK_POSITIONS[self.dock_index]
+        self.object_scale: float = 0.78
 
         # Current 3D orientation (degrees)
         self.rot_x: float = 22.0
@@ -304,6 +319,21 @@ class AeroTouchRenderer:
     @property
     def render_mode_label(self) -> str:
         return "WIREFRAME [W]" if self.wireframe_mode else "POLYGON SOLID [P]"
+
+    @property
+    def dock_label(self) -> str:
+        return DOCK_POSITIONS[self.dock_index][0]
+
+    def cycle_dock_position(self) -> str:
+        """Cycle the 3D hologram anchor between Right Side, Left Side, Top-Right & Center."""
+        self.dock_index = (self.dock_index + 1) % len(DOCK_POSITIONS)
+        label, self.pos_x, self.pos_y, self.pos_z = DOCK_POSITIONS[self.dock_index]
+        return label
+
+    def nudge_position(self, dx: float, dy: float) -> None:
+        """Fine-tune 3D object world position safely inside camera viewport bounds."""
+        self.pos_x = max(-2.25, min(2.25, self.pos_x + dx))
+        self.pos_y = max(-1.15, min(1.10, self.pos_y + dy))
 
     def update_rotation(self, dt: float) -> None:
         """Advance smooth frame-rate-independent rotation angles."""
@@ -394,7 +424,7 @@ class AeroTouchRenderer:
         # Pass 1: 2D Webcam AR Background
         self.draw_background_quad()
 
-        # Pass 2: 3D Perspective Object in Center of Screen
+        # Pass 2: 3D Perspective Object Anchored cleanly in Side AR Zone
         glClear(GL_DEPTH_BUFFER_BIT)
         glEnable(GL_DEPTH_TEST)
 
@@ -406,7 +436,8 @@ class AeroTouchRenderer:
         glLoadIdentity()
         self.apply_lighting_state()
 
-        glTranslatef(0.0, 0.0, -5.2)
+        glTranslatef(self.pos_x, self.pos_y, self.pos_z)
+        glScalef(self.object_scale, self.object_scale, self.object_scale)
         glRotatef(self.rot_x, 1.0, 0.0, 0.0)
         glRotatef(self.rot_y, 0.0, 1.0, 0.0)
         glRotatef(self.rot_z, 0.0, 0.0, 1.0)
@@ -491,13 +522,12 @@ def draw_step2_hud(
         cv2.LINE_AA,
     )
 
-    skel_tag = "ON" if show_skeleton else "OFF"
     cv2.putText(
         frame_bgr,
-        f"[W] Wireframe  [P] Polygon  [L] Light  [S] Shape  [H] Hand:{skel_tag}  [Space] Pause  [Q] Quit",
+        f"[W] Wire  [P] Poly  [L] Light  [S] Shape  [D/Arrows] Move ({renderer.dock_label})  [Q] Quit",
         (10, frame_h - 9),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.37,
+        0.36,
         (175, 210, 240),
         1,
         cv2.LINE_AA,
@@ -530,6 +560,7 @@ def main() -> None:
     print("[AeroTouch 3D] OpenGL AR Engine running!")
     print("  [W] Wireframe Mode   |  [P] Solid Polygon Mode")
     print("  [L] Cycle Lighting   |  [S] Switch Cube / Pyramid")
+    print("  [D] Switch Side/Pos  |  [Arrow Keys] Move 3D Object Smoothly")
     print("  [SPACE] Pause Spin   |  [H] Toggle Hand Skeleton   |  [Q / ESC] Quit")
 
     running = True
@@ -564,10 +595,25 @@ def main() -> None:
                             "PYRAMID" if renderer.shape_mode == "CUBE" else "CUBE"
                         )
                         print(f"[3D Shape] Switched to: {renderer.shape_mode}")
+                    elif event.key == pygame.K_d:
+                        loc = renderer.cycle_dock_position()
+                        print(f"[Position] Docked 3D shape to: {loc}")
                     elif event.key == pygame.K_h:
                         show_skeleton = not show_skeleton
                     elif event.key == K_SPACE:
                         renderer.auto_rotate = not renderer.auto_rotate
+
+            # Smooth continuous movement with Arrow Keys
+            pressed = pygame.key.get_pressed()
+            move_speed = 2.2 * dt
+            if pressed[K_LEFT]:
+                renderer.nudge_position(-move_speed, 0.0)
+            if pressed[K_RIGHT]:
+                renderer.nudge_position(move_speed, 0.0)
+            if pressed[K_UP]:
+                renderer.nudge_position(0.0, move_speed)
+            if pressed[K_DOWN]:
+                renderer.nudge_position(0.0, -move_speed)
 
             # 2. Capture Webcam Frame + Track Hand Pose
             success, frame = cap.read()
