@@ -23,9 +23,10 @@ Hand Gesture Controls:
   * PINCH (Thumb + Index)  : NITRO TURBO BOOST (max speed + 2x score multiplier!)
   * (Game Over) PINCH      : Restart race hands-free (or press [R])
 
-Keyboard Controls (Always Active Alongside Gestures):
-  [Left/Right or A/D] Steer   |  [Down / S / Space] Brake  |  [Up / W / N] Nitro
-  [C] Toggle Camera Monitor   |  [R] Restart Race          |  [Q / ESC] Quit
+Keyboard & Menu Controls (Always Active Alongside Gestures):
+  [1 / 2 / 3] Easy / Medium / Hard   |  [M] Open Mode Selection Menu
+  [Left/Right or A/D] Steer          |  [Down / S / Space] Brake  |  [Up / W / N] Nitro
+  [C] Toggle Camera Monitor          |  [R] Restart Race          |  [Q / ESC] Quit
 """
 
 from collections import deque
@@ -66,12 +67,96 @@ LANE_CENTERS = tuple(ROAD_LEFT + LANE_W * i + LANE_W // 2 for i in range(NUM_LAN
 
 PLAYER_Y = GAME_H - 145
 MIN_SPEED_KMH = 75.0
-CRUISE_SPEED_KMH = 195.0
-NITRO_SPEED_KMH = 305.0
 KMH_TO_PX_PER_SEC = 3.15
 
 LK_LANDMARK_IDS = (0, 4, 5, 8, 9, 12, 13, 16, 17, 20)
 CAM_WINDOW_TITLE = "AeroDrive - Gesture & Optical Flow Monitor"
+
+
+@dataclass(frozen=True)
+class DifficultyConfig:
+    """Per-mode traffic density, indicator/lane-switch rules & speed scaling."""
+
+    key: str
+    hotkey_label: str
+    theme_rgb: Tuple[int, int, int]
+    summary_line1: str
+    summary_line2: str
+    base_spawn_s: float
+    min_spawn_s: float
+    max_blocked_lanes: int
+    spawn_clearance_y: float
+    use_indicators: bool
+    aggression_mult: float
+    signal_lead_range: Tuple[float, float]
+    merge_speed_mult: float
+    base_cruise_kmh: float
+    max_score_speed_bonus: float
+    nitro_kmh: float
+    score_mult: float
+
+
+DIFFICULTY_ORDER = ("EASY", "MEDIUM", "HARD")
+
+DIFFICULTY_CONFIGS: Dict[str, DifficultyConfig] = {
+    "EASY": DifficultyConfig(
+        key="EASY",
+        hotkey_label="[1] EASY",
+        theme_rgb=(72, 235, 148),
+        summary_line1="Light Traffic",
+        summary_line2="No Blinker Merges",
+        base_spawn_s=1.42,
+        min_spawn_s=0.72,
+        max_blocked_lanes=2,
+        spawn_clearance_y=290.0,
+        use_indicators=False,
+        aggression_mult=0.0,
+        signal_lead_range=(1.0, 1.2),
+        merge_speed_mult=1.0,
+        base_cruise_kmh=165.0,
+        max_score_speed_bonus=55.0,
+        nitro_kmh=270.0,
+        score_mult=1.0,
+    ),
+    "MEDIUM": DifficultyConfig(
+        key="MEDIUM",
+        hotkey_label="[2] MEDIUM",
+        theme_rgb=(88, 215, 255),
+        summary_line1="Balanced Traffic",
+        summary_line2="Amber Indicators ON",
+        base_spawn_s=0.92,
+        min_spawn_s=0.46,
+        max_blocked_lanes=3,
+        spawn_clearance_y=235.0,
+        use_indicators=True,
+        aggression_mult=1.0,
+        signal_lead_range=(0.82, 1.12),
+        merge_speed_mult=1.0,
+        base_cruise_kmh=195.0,
+        max_score_speed_bonus=68.0,
+        nitro_kmh=305.0,
+        score_mult=1.25,
+    ),
+    "HARD": DifficultyConfig(
+        key="HARD",
+        hotkey_label="[3] HARD",
+        theme_rgb=(255, 92, 118),
+        summary_line1="Heavy Rush Traffic",
+        summary_line2="Fast Blinker Cuts!",
+        base_spawn_s=0.62,
+        min_spawn_s=0.34,
+        max_blocked_lanes=3,
+        spawn_clearance_y=190.0,
+        use_indicators=True,
+        aggression_mult=1.80,
+        signal_lead_range=(0.56, 0.80),
+        merge_speed_mult=1.35,
+        base_cruise_kmh=220.0,
+        max_score_speed_bonus=82.0,
+        nitro_kmh=335.0,
+        score_mult=1.60,
+    ),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -605,12 +690,54 @@ class TopDownTrafficGame:
         self.font_big = pygame.font.SysFont("consolas", 36, bold=True)
         self.font_small = pygame.font.SysFont("consolas", 15, bold=True)
 
-        self.best_score: int = 0
+        self.difficulty_key: str = "MEDIUM"
+        self.menu_cursor_idx: int = 1
+        self.in_menu: bool = True
+        self.pinch_latch: bool = False
+        self.best_scores: Dict[str, int] = {m: 0 for m in DIFFICULTY_ORDER}
+
         self.scenery_items: List[Tuple[float, float, str]] = []
         for sy in range(0, GAME_H + 120, 95):
             self._spawn_scenery_row(float(sy))
 
         self.reset()
+
+    @property
+    def cfg(self) -> DifficultyConfig:
+        return DIFFICULTY_CONFIGS[self.difficulty_key]
+
+    @property
+    def best_score(self) -> int:
+        return self.best_scores[self.difficulty_key]
+
+    @property
+    def score_ramp(self) -> float:
+        """Smooth [0.0 .. 1.0) progression factor driven directly by current score."""
+        return 1.0 - math.exp(-max(0.0, self.score) / 5000.0)
+
+    def select_difficulty(self, mode_key: str) -> None:
+        """Select EASY, MEDIUM, or HARD mode and start a fresh race immediately."""
+        self.difficulty_key = mode_key
+        self.menu_cursor_idx = DIFFICULTY_ORDER.index(mode_key)
+        self.in_menu = False
+        self.pinch_latch = True
+        self.reset()
+
+    def open_menu(self) -> None:
+        """Open the interactive Easy / Medium / Hard mode selector overlay."""
+        self.in_menu = True
+        self.pinch_latch = True
+
+    @staticmethod
+    def mode_card_rects() -> List[pygame.Rect]:
+        card_w, card_h, gap = 228, 225, 22
+        total_w = 3 * card_w + 2 * gap
+        start_x = (GAME_W - total_w) // 2
+        y = GAME_H // 2 - 90
+        return [
+            pygame.Rect(start_x + i * (card_w + gap), y, card_w, card_h)
+            for i in range(3)
+        ]
 
     @staticmethod
     def _bake_road_tile(tile_h: int) -> pygame.Surface:
@@ -689,10 +816,11 @@ class TopDownTrafficGame:
         self.scenery_items.append((right_x, y_pos, random.choice(("TREE", "LAMP", "BUSH"))))
 
     def reset(self) -> None:
+        cfg = self.cfg
         self.player_x: float = float((LANE_CENTERS[1] + LANE_CENTERS[2]) * 0.5)
         self.player_vx: float = 0.0
         self.player_heading: float = 0.0
-        self.speed_kmh: float = 155.0
+        self.speed_kmh: float = cfg.base_cruise_kmh * 0.85
         self.is_braking: bool = False
         self.is_nitro: bool = False
         self.player_blinker: int = 0
@@ -702,6 +830,7 @@ class TopDownTrafficGame:
         self.shake_timer: float = 0.0
         self.game_over: bool = False
         self.score: float = 0.0
+        self.stage: int = 1
         self.combo: int = 1
         self.combo_decay_timer: float = 0.0
         self.distance_m: float = 0.0
@@ -711,7 +840,15 @@ class TopDownTrafficGame:
         self.spawn_timer: float = 0.35
 
         self.traffic: List[TrafficCar] = []
-        self.popups: List[FloatingPopup] = []
+        self.popups: List[FloatingPopup] = [
+            FloatingPopup(
+                f"{cfg.key} MODE - {cfg.summary_line2.upper()}",
+                GAME_W * 0.5,
+                PLAYER_Y - 125,
+                cfg.theme_rgb,
+                timer=1.5,
+            )
+        ]
         self.skids: Deque[SkidSegment] = deque(maxlen=90)
         self.particles: List[SmokePuff] = []
 
@@ -719,53 +856,61 @@ class TopDownTrafficGame:
         return pygame.Rect(int(self.player_x) - 23, int(PLAYER_Y) - 48, 46, 96)
 
     def _try_spawn_traffic(self) -> None:
-        """Spawn varied vehicles while ALWAYS guaranteeing at least 1 passable lane."""
+        """Spawn vehicles according to active difficulty mode & score progression."""
+        cfg = self.cfg
+        ramp = self.score_ramp
+
         candidate_lanes = list(range(NUM_LANES))
         random.shuffle(candidate_lanes)
 
-        # Count how many lanes are currently occupied near the top spawn zone
+        # Enforce mode-specific max blocked lanes (Easy leaves >= 2 open lanes!)
         blocked_top = set()
         for c in self.traffic:
-            if c.y < 190:
+            if c.y < 195:
                 blocked_top.add(c.lane)
                 blocked_top.add(c.target_lane)
-        if len(blocked_top) >= NUM_LANES - 1:
-            return  # Guarantee at least 1 open corridor at all times!
+        if len(blocked_top) >= cfg.max_blocked_lanes:
+            return
+
+        # Slight clearance tightening as score rises while staying completely fair
+        clearance_y = max(175.0, cfg.spawn_clearance_y - 35.0 * ramp)
 
         for lane in candidate_lanes:
             if any(
-                (c.lane == lane or c.target_lane == lane) and c.y < 235
+                (c.lane == lane or c.target_lane == lane) and c.y < clearance_y
                 for c in self.traffic
             ):
                 continue
 
-            # Weighted vehicle mix: Trucks prefer outer lanes, Coupes prefer fast lanes!
+            # Vehicle mix shifts toward faster sport coupes in harder modes & higher scores
+            fast_weight = 10 + int(18 * ramp) + (14 if cfg.key == "HARD" else 0)
             if lane in (0, NUM_LANES - 1):
                 kind = random.choices(
                     ["SEDAN", "TAXI", "SUV", "TRUCK", "COUPE"],
-                    weights=[30, 18, 22, 18, 12],
+                    weights=[30, 18, 22, 18, fast_weight],
                 )[0]
             else:
                 kind = random.choices(
                     ["SEDAN", "TAXI", "COUPE", "SUV"],
-                    weights=[32, 20, 30, 18],
+                    weights=[30, 20, 18 + fast_weight, 18],
                 )[0]
 
             speed_ranges = {
-                "TRUCK": (88.0, 108.0),
-                "SUV": (105.0, 132.0),
-                "SEDAN": (112.0, 145.0),
-                "TAXI": (115.0, 150.0),
-                "COUPE": (132.0, 168.0),
+                "TRUCK": (84.0, 106.0),
+                "SUV": (102.0, 130.0),
+                "SEDAN": (110.0, 144.0),
+                "TAXI": (114.0, 150.0),
+                "COUPE": (132.0, 170.0),
             }
             lo, hi = speed_ranges[kind]
-            spd = random.uniform(lo, hi)
+            # Traffic pace rises steadily as player score climbs
+            spd = random.uniform(lo, hi) + 24.0 * ramp
             col = random.choice(self.sprites.palettes[kind])
             surf = self.sprites.traffic_surfaces[(kind, col)]
             aggr = (
                 random.uniform(0.55, 0.95)
                 if kind in ("COUPE", "TAXI")
-                else random.uniform(0.18, 0.55)
+                else random.uniform(0.20, 0.55)
             )
             if kind == "TRUCK":
                 aggr = random.uniform(0.08, 0.22)
@@ -782,7 +927,7 @@ class TopDownTrafficGame:
                     base_speed_kmh=spd,
                     speed_kmh=spd,
                     aggression=aggr,
-                    decision_timer=random.uniform(0.5, 2.2),
+                    decision_timer=random.uniform(0.45, 1.9),
                 )
             )
             break
@@ -805,7 +950,10 @@ class TopDownTrafficGame:
         return True
 
     def _update_traffic_ai(self, dt: float) -> None:
-        """Update traffic following speeds, unpredictable lane decisions & blinkers."""
+        """Update traffic following speeds, mode-dependent blinkers & lane changes."""
+        cfg = self.cfg
+        ramp = self.score_ramp
+
         for car in self.traffic:
             car.is_braking = False
             ahead_car: Optional[TrafficCar] = None
@@ -836,61 +984,76 @@ class TopDownTrafficGame:
 
             car.speed_kmh += (desired_spd - car.speed_kmh) * min(1.0, 4.5 * dt)
 
-            # State 1: Cruising in lane -> decide unpredictably (or when blocked!) to switch lanes
-            if car.blinker_dir == 0 and not car.is_merging:
-                car.decision_timer -= dt
-                player_approaching = 140.0 < (PLAYER_Y - car.y) < 560.0
-                want_check = car.decision_timer <= 0.0 or blocked_ahead
-                if want_check and -40.0 < car.y < PLAYER_Y - 135.0:
-                    car.decision_timer = random.uniform(1.1, 3.0)
-                    chance = car.aggression * (
-                        1.45 if (blocked_ahead or player_approaching) else 0.65
-                    )
-                    if random.random() < chance:
-                        neighbors = [
-                            nl
-                            for nl in (car.lane - 1, car.lane + 1)
-                            if 0 <= nl < NUM_LANES
-                        ]
-                        random.shuffle(neighbors)
-                        for nl in neighbors:
-                            if self._lane_is_clear_for_merge(car, nl):
-                                car.target_lane = nl
-                                car.blinker_dir = -1 if nl < car.lane else 1
-                                # Signal clearly with flashing indicator BEFORE moving!
-                                car.signal_lead_timer = random.uniform(0.75, 1.05)
-                                break
-
-            # State 2: Flashing Amber Turn Signal before lane change
-            elif car.blinker_dir != 0 and not car.is_merging:
-                car.signal_lead_timer -= dt
-                if not self._lane_is_clear_for_merge(car, car.target_lane):
-                    # Abort safely if another car entered target gap
-                    car.target_lane = car.lane
-                    car.blinker_dir = 0
-                elif car.signal_lead_timer <= 0.0:
-                    car.is_merging = True
-
-            # State 3: Smoothly steering across into `target_lane` with blinker still flashing
-            if car.is_merging:
-                dest_x = float(LANE_CENTERS[car.target_lane])
-                diff_x = dest_x - car.x
-                lateral_speed = (115.0 + 75.0 * car.aggression) * dt
-                if abs(diff_x) <= lateral_speed:
-                    car.x = dest_x
-                    car.lane = car.target_lane
-                    car.is_merging = False
-                    car.blinker_dir = 0
-                    car.heading_deg = 0.0
-                    car.decision_timer = random.uniform(1.8, 3.8)
-                else:
-                    step_x = math.copysign(lateral_speed, diff_x)
-                    car.x += step_x
-                    car.heading_deg += (
-                        math.copysign(11.0, diff_x) - car.heading_deg
-                    ) * min(1.0, 9.0 * dt)
+            # EASY Mode strictly keeps vehicles in their own lane without indicators!
+            if not cfg.use_indicators:
+                car.blinker_dir = 0
+                car.is_merging = False
+                car.heading_deg = 0.0
             else:
-                car.heading_deg += (0.0 - car.heading_deg) * min(1.0, 8.0 * dt)
+                # MEDIUM & HARD Modes: Use amber indicators & switch lanes more as score grows!
+                eff_aggr = (
+                    car.aggression * cfg.aggression_mult * (1.0 + 0.85 * ramp)
+                )
+
+                # State 1: Cruising -> decide unpredictably (or when blocked!) to switch lanes
+                if car.blinker_dir == 0 and not car.is_merging:
+                    car.decision_timer -= dt
+                    player_approaching = 140.0 < (PLAYER_Y - car.y) < 560.0
+                    want_check = car.decision_timer <= 0.0 or blocked_ahead
+                    if want_check and -40.0 < car.y < PLAYER_Y - 135.0:
+                        car.decision_timer = random.uniform(
+                            max(0.65, 1.15 - 0.35 * ramp),
+                            max(1.40, 2.90 - 0.80 * ramp),
+                        )
+                        chance = eff_aggr * (
+                            1.45 if (blocked_ahead or player_approaching) else 0.65
+                        )
+                        if random.random() < chance:
+                            neighbors = [
+                                nl
+                                for nl in (car.lane - 1, car.lane + 1)
+                                if 0 <= nl < NUM_LANES
+                            ]
+                            random.shuffle(neighbors)
+                            for nl in neighbors:
+                                if self._lane_is_clear_for_merge(car, nl):
+                                    car.target_lane = nl
+                                    car.blinker_dir = -1 if nl < car.lane else 1
+                                    lo_t, hi_t = cfg.signal_lead_range
+                                    car.signal_lead_timer = random.uniform(lo_t, hi_t)
+                                    break
+
+                # State 2: Flashing Amber Turn Signal before lane change
+                elif car.blinker_dir != 0 and not car.is_merging:
+                    car.signal_lead_timer -= dt
+                    if not self._lane_is_clear_for_merge(car, car.target_lane):
+                        car.target_lane = car.lane
+                        car.blinker_dir = 0
+                    elif car.signal_lead_timer <= 0.0:
+                        car.is_merging = True
+
+                # State 3: Smoothly steering across into `target_lane` with blinker flashing
+                if car.is_merging:
+                    dest_x = float(LANE_CENTERS[car.target_lane])
+                    diff_x = dest_x - car.x
+                    lateral_speed = (
+                        (115.0 + 75.0 * car.aggression) * cfg.merge_speed_mult * dt
+                    )
+                    if abs(diff_x) <= lateral_speed:
+                        car.x = dest_x
+                        car.lane = car.target_lane
+                        car.is_merging = False
+                        car.blinker_dir = 0
+                        car.heading_deg = 0.0
+                        car.decision_timer = random.uniform(1.4, 3.2)
+                    else:
+                        step_x = math.copysign(lateral_speed, diff_x)
+                        car.x += step_x
+                        car.heading_deg += (
+                            math.copysign(11.5, diff_x) - car.heading_deg
+                        ) * min(1.0, 9.0 * dt)
+                else:
+                    car.heading_deg += (0.0 - car.heading_deg) * min(1.0, 8.0 * dt)
 
             # Vertical motion relative to scrolling camera (`player speed - traffic speed`)
             rel_vy = (self.speed_kmh - car.speed_kmh) * KMH_TO_PX_PER_SEC
@@ -904,10 +1067,31 @@ class TopDownTrafficGame:
         key_brake: bool,
         key_nitro: bool,
     ) -> None:
+        if not ctrl.is_nitro:
+            self.pinch_latch = False
+
+        if self.in_menu:
+            # Gentle animated background highway scroll behind Mode Menu
+            self.scroll_y = (self.scroll_y + 180.0 * dt) % self.tile_h
+            if ctrl.hand_detected:
+                if ctrl.steer_target < -0.33:
+                    self.menu_cursor_idx = 0
+                elif ctrl.steer_target > 0.33:
+                    self.menu_cursor_idx = 2
+                else:
+                    self.menu_cursor_idx = 1
+                if ctrl.is_nitro and not self.pinch_latch:
+                    self.select_difficulty(DIFFICULTY_ORDER[self.menu_cursor_idx])
+            return
+
         if self.game_over:
-            if ctrl.is_nitro:  # Pinch in mid-air to restart hands-free!
+            if ctrl.is_nitro and not self.pinch_latch:  # Pinch to restart hands-free!
+                self.pinch_latch = True
                 self.reset()
             return
+
+        cfg = self.cfg
+        ramp = self.score_ramp
 
         # 1. Combine Hand Gestures + Optional Keyboard Controls seamlessly
         self.is_braking = ctrl.is_braking or key_brake
@@ -917,11 +1101,10 @@ class TopDownTrafficGame:
             target_speed = MIN_SPEED_KMH
             accel_rate = 3.8
         elif self.is_nitro:
-            target_speed = NITRO_SPEED_KMH
+            target_speed = cfg.nitro_kmh + 30.0 * ramp
             accel_rate = 2.8
         else:
-            difficulty_cruise = min(40.0, self.distance_m * 0.015)
-            target_speed = CRUISE_SPEED_KMH + difficulty_cruise
+            target_speed = cfg.base_cruise_kmh + cfg.max_score_speed_bonus * ramp
             accel_rate = 1.9
 
         self.speed_kmh += (target_speed - self.speed_kmh) * min(1.0, accel_rate * dt)
@@ -990,12 +1173,27 @@ class TopDownTrafficGame:
             if sy + world_px_s * dt < GAME_H + 80
         ]
 
-        # Distance & base score
+        # Distance, Score & Dynamic Score-Based Stage Escalation
         meters_step = (self.speed_kmh / 3.6) * dt
         self.distance_m += meters_step
-        mult = 2 if self.is_nitro else 1
-        self.score += meters_step * 1.4 * mult
-        self.best_score = max(self.best_score, int(self.score))
+        mult = (2.0 if self.is_nitro else 1.0) * cfg.score_mult
+        self.score += meters_step * 1.45 * mult
+        self.best_scores[self.difficulty_key] = max(
+            self.best_scores[self.difficulty_key], int(self.score)
+        )
+
+        new_stage = 1 + int(self.score // 1500)
+        if new_stage > self.stage:
+            self.stage = new_stage
+            self.popups.append(
+                FloatingPopup(
+                    f"STAGE {self.stage}! SPEED & TRAFFIC UP!",
+                    GAME_W * 0.5,
+                    PLAYER_Y - 120,
+                    (255, 220, 75),
+                    timer=1.45,
+                )
+            )
 
         if self.combo_decay_timer > 0.0:
             self.combo_decay_timer -= dt
@@ -1006,12 +1204,14 @@ class TopDownTrafficGame:
         if self.shake_timer > 0.0:
             self.shake_timer = max(0.0, self.shake_timer - dt)
 
-        # Spawn & update AI traffic
+        # Spawn interval tightens steadily as score grows!
         self.spawn_timer -= dt
         if self.spawn_timer <= 0.0:
             self._try_spawn_traffic()
-            density = max(0.42, 0.92 - min(0.42, self.distance_m * 0.00025))
-            self.spawn_timer = random.uniform(density * 0.8, density * 1.25)
+            cur_interval = cfg.base_spawn_s - self.score_ramp * (
+                cfg.base_spawn_s - cfg.min_spawn_s
+            )
+            self.spawn_timer = random.uniform(cur_interval * 0.82, cur_interval * 1.18)
 
         self._update_traffic_ai(dt)
 
@@ -1057,9 +1257,11 @@ class TopDownTrafficGame:
                 and self.speed_kmh > 135.0
             ):
                 car.passed_awarded = True
-                pts = 100 * self.combo * (2 if self.is_nitro else 1)
+                pts = int(round(100 * self.combo * (2 if self.is_nitro else 1) * cfg.score_mult))
                 self.score += pts
-                self.best_score = max(self.best_score, int(self.score))
+                self.best_scores[self.difficulty_key] = max(
+                    self.best_scores[self.difficulty_key], int(self.score)
+                )
                 self.combo = min(10, self.combo + 1)
                 self.combo_decay_timer = 3.2
                 self.popups.append(
@@ -1216,10 +1418,11 @@ class TopDownTrafficGame:
     def _draw_dashboard(
         self, screen: pygame.Surface, ctrl: GestureControlSnapshot, fps: float
     ) -> None:
+        cfg = self.cfg
         header = pygame.Surface((GAME_W, 74), pygame.SRCALPHA)
-        header.fill((14, 18, 28, 222))
+        header.fill((14, 18, 28, 224))
         screen.blit(header, (0, 0))
-        pygame.draw.line(screen, (55, 195, 255), (0, 74), (GAME_W, 74), 2)
+        pygame.draw.line(screen, cfg.theme_rgb, (0, 74), (GAME_W, 74), 2)
 
         # Speedometer + Pedal Badge
         spd_col = (
@@ -1228,14 +1431,19 @@ class TopDownTrafficGame:
             else ((90, 255, 205) if self.is_nitro else (255, 255, 255))
         )
         spd_txt = self.font_hud.render(f"SPEED: {int(self.speed_kmh):3d} km/h", True, spd_col)
-        screen.blit(spd_txt, (18, 12))
+        screen.blit(spd_txt, (16, 12))
 
         pedal_str = (
-            "PEDAL: BRAKING [FIST]"
+            "BRAKING [FIST]"
             if self.is_braking
-            else ("PEDAL: NITRO BOOST [PINCH]" if self.is_nitro else "PEDAL: CRUISE [OPEN HAND]")
+            else ("NITRO [PINCH]" if self.is_nitro else "CRUISE [OPEN]")
         )
-        screen.blit(self.font_small.render(pedal_str, True, spd_col), (18, 43))
+        screen.blit(
+            self.font_small.render(
+                f"{pedal_str}  |  {cfg.key} STG {self.stage}", True, cfg.theme_rgb
+            ),
+            (16, 43),
+        )
 
         # Score, Distance & Combo
         score_txt = self.font_hud.render(
@@ -1260,36 +1468,89 @@ class TopDownTrafficGame:
 
         # Footer controls bar
         footer = pygame.Surface((GAME_W, 30), pygame.SRCALPHA)
-        footer.fill((14, 18, 28, 220))
+        footer.fill((14, 18, 28, 222))
         screen.blit(footer, (0, GAME_H - 30))
         ctrl_line = (
-            "Hand Left/Right: Steer  |  Close Fist: BRAKE  |  Pinch: NITRO  |  "
-            "[C] Cam Window  [R] Restart  [Q] Quit"
+            "Hand: Steer | Fist: Brake | Pinch: Nitro | "
+            "[1-3] Mode [M] Menu [C] Cam [R] Retry [Q] Quit"
         )
-        screen.blit(self.font_small.render(ctrl_line, True, (175, 215, 245)), (16, GAME_H - 23))
+        screen.blit(self.font_small.render(ctrl_line, True, (175, 215, 245)), (20, GAME_H - 23))
+
+        # Interactive Easy / Medium / Hard Mode Selection Overlay
+        if self.in_menu:
+            veil = pygame.Surface((GAME_W, GAME_H - 104), pygame.SRCALPHA)
+            veil.fill((10, 14, 24, 205))
+            screen.blit(veil, (0, 74))
+
+            title = self.font_big.render("SELECT TRAFFIC DIFFICULTY", True, (240, 248, 255))
+            sub = self.font_small.render(
+                "Click a Card, press [1] / [2] / [3], or Move Hand + PINCH to Start!",
+                True,
+                (140, 225, 255),
+            )
+            screen.blit(title, title.get_rect(center=(GAME_W // 2, 162)))
+            screen.blit(sub, sub.get_rect(center=(GAME_W // 2, 205)))
+
+            rects = self.mode_card_rects()
+            for idx, m_key in enumerate(DIFFICULTY_ORDER):
+                mc = DIFFICULTY_CONFIGS[m_key]
+                r = rects[idx]
+                selected = idx == self.menu_cursor_idx
+
+                card_surf = pygame.Surface((r.width, r.height), pygame.SRCALPHA)
+                card_surf.fill((22, 30, 48, 242) if selected else (16, 20, 32, 218))
+                screen.blit(card_surf, r.topleft)
+                pygame.draw.rect(
+                    screen,
+                    mc.theme_rgb if selected else (70, 88, 115),
+                    r,
+                    4 if selected else 2,
+                    border_radius=14,
+                )
+
+                h_lbl = self.font_hud.render(mc.hotkey_label, True, mc.theme_rgb)
+                l1 = self.font_small.render(mc.summary_line1, True, (235, 242, 250))
+                l2 = self.font_small.render(mc.summary_line2, True, mc.theme_rgb)
+                l3 = self.font_small.render(
+                    f"Cruise: {int(mc.base_cruise_kmh)}+ km/h", True, (180, 198, 220)
+                )
+                l4 = self.font_small.render(
+                    "Ramps up with Score!", True, (255, 220, 110)
+                )
+                best_lbl = self.font_small.render(
+                    f"Best: {self.best_scores[m_key]:06d}", True, (150, 210, 235)
+                )
+
+                screen.blit(h_lbl, h_lbl.get_rect(center=(r.centerx, r.top + 34)))
+                screen.blit(l1, l1.get_rect(center=(r.centerx, r.top + 78)))
+                screen.blit(l2, l2.get_rect(center=(r.centerx, r.top + 106)))
+                screen.blit(l3, l3.get_rect(center=(r.centerx, r.top + 142)))
+                screen.blit(l4, l4.get_rect(center=(r.centerx, r.top + 168)))
+                screen.blit(best_lbl, best_lbl.get_rect(center=(r.centerx, r.top + 198)))
+            return
 
         # Game Over overlay card
         if self.game_over:
-            card = pygame.Surface((520, 185), pygame.SRCALPHA)
-            card.fill((14, 18, 30, 238))
-            cx, cy = GAME_W // 2 - 260, GAME_H // 2 - 92
+            card = pygame.Surface((600, 195), pygame.SRCALPHA)
+            card.fill((14, 18, 30, 240))
+            cx, cy = GAME_W // 2 - 300, GAME_H // 2 - 98
             screen.blit(card, (cx, cy))
-            pygame.draw.rect(screen, (255, 85, 105), (cx, cy, 520, 185), 3, border_radius=12)
+            pygame.draw.rect(screen, (255, 85, 105), (cx, cy, 600, 195), 3, border_radius=12)
 
-            t1 = self.font_big.render("TRAFFIC WRECKED!", True, (255, 95, 110))
+            t1 = self.font_big.render(f"CRASHED! ({cfg.key} STG {self.stage})", True, (255, 95, 110))
             t2 = self.font_hud.render(
-                f"Final Score: {int(self.score):06d}   |   Best: {self.best_score:06d}",
+                f"Score: {int(self.score):06d}   |   {cfg.key} Best: {self.best_score:06d}",
                 True,
                 (240, 245, 255),
             )
             t3 = self.font_small.render(
-                "PINCH THUMB + INDEX or press [R] to Race Again!",
+                "PINCH or [R] Retry  |  [1] Easy  [2] Med  [3] Hard  [M] Menu",
                 True,
                 (95, 255, 195),
             )
-            screen.blit(t1, t1.get_rect(center=(GAME_W // 2, cy + 50)))
+            screen.blit(t1, t1.get_rect(center=(GAME_W // 2, cy + 48)))
             screen.blit(t2, t2.get_rect(center=(GAME_W // 2, cy + 102)))
-            screen.blit(t3, t3.get_rect(center=(GAME_W // 2, cy + 146)))
+            screen.blit(t3, t3.get_rect(center=(GAME_W // 2, cy + 150)))
 
 
 # ---------------------------------------------------------------------------
@@ -1324,9 +1585,33 @@ def main() -> None:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
+                elif event.type == pygame.MOUSEMOTION and game.in_menu:
+                    for idx, rect in enumerate(game.mode_card_rects()):
+                        if rect.collidepoint(event.pos):
+                            game.menu_cursor_idx = idx
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    if game.in_menu:
+                        for idx, rect in enumerate(game.mode_card_rects()):
+                            if rect.collidepoint(event.pos):
+                                game.select_difficulty(DIFFICULTY_ORDER[idx])
+                                break
                 elif event.type == pygame.KEYDOWN:
                     if event.key in (pygame.K_ESCAPE, pygame.K_q):
                         running = False
+                    elif event.key in (pygame.K_1, pygame.K_KP1):
+                        game.select_difficulty("EASY")
+                    elif event.key in (pygame.K_2, pygame.K_KP2):
+                        game.select_difficulty("MEDIUM")
+                    elif event.key in (pygame.K_3, pygame.K_KP3):
+                        game.select_difficulty("HARD")
+                    elif event.key == pygame.K_m:
+                        game.open_menu()
+                    elif game.in_menu and event.key in (pygame.K_LEFT, pygame.K_a):
+                        game.menu_cursor_idx = (game.menu_cursor_idx - 1) % 3
+                    elif game.in_menu and event.key in (pygame.K_RIGHT, pygame.K_d):
+                        game.menu_cursor_idx = (game.menu_cursor_idx + 1) % 3
+                    elif game.in_menu and event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                        game.select_difficulty(DIFFICULTY_ORDER[game.menu_cursor_idx])
                     elif event.key == pygame.K_r:
                         game.reset()
                     elif event.key == pygame.K_c and vision.init_error is None:
