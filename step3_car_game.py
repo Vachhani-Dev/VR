@@ -686,9 +686,10 @@ class TopDownTrafficGame:
         self.road_tile = self._bake_road_tile(self.tile_h)
         self.headlight_cone = self._bake_headlight_cone()
 
-        self.font_hud = pygame.font.SysFont("consolas", 20, bold=True)
-        self.font_big = pygame.font.SysFont("consolas", 36, bold=True)
-        self.font_small = pygame.font.SysFont("consolas", 15, bold=True)
+        mono = ["consolas", "dejavusansmono", "couriernew", "monospace"]
+        self.font_hud = pygame.font.SysFont(mono, 20, bold=True)
+        self.font_big = pygame.font.SysFont(mono, 36, bold=True)
+        self.font_small = pygame.font.SysFont(mono, 15, bold=True)
 
         self.difficulty_key: str = "MEDIUM"
         self.menu_cursor_idx: int = 1
