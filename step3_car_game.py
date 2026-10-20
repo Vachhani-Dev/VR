@@ -1,1154 +1,1372 @@
 """
-AeroTouch 3D - Step 3: AeroDrive 3D (AR Hand-Gesture & Optical-Flow Car Game)
-Unit 5: Vision-Based AR - Pose Estimation, Pinch Scaling/Boost, Pyramidal
-        Lucas-Kanade Optical Flow (`cv2.calcOpticalFlowPyrLK`), and 3D OpenGL Rendering
+AeroDrive 2D - Top-Down Hand-Gesture & Optical-Flow Highway Traffic Racer
+Part of AeroTouch 3D (Unit 5: Pose Estimation, Pinch, Fist Brake & Lucas-Kanade Optical Flow)
 
-Gameplay & Gesture Controls:
-  * MOVE HAND LEFT / RIGHT : Smoothly steer & bank your 3D OpenGL Sports Car
-                             across the 3-lane AR cyber-highway!
-  * PINCH (Thumb + Index)  : Activate NITRO TURBO BOOST (2x speed, 2x score
-                             multiplier & twin 3D exhaust flames)!
-                             (Also Pinch on Game Over to restart hands-free!)
-  * QUICK UPWARD SWIPE     : Tracked via Pyramidal Lucas-Kanade Optical Flow
-                             (`cv2.calcOpticalFlowPyrLK`) -> launches your 3D car
-                             into a 360-degree STUNT FLIP JUMP over road barriers!
-  * [G] GARAGE INSPECT MODE: Toggle close-up 3D Showroom mode where finger spread
-                             distance directly SCALES & ROTATES the 3D Sports Car!
+Architecture (Zero-Lag 60 FPS Dual-Window Design):
+  1. Dedicated Main Game Window (`pygame`, locked 60 FPS):
+     - Crisp top-down 2D 4-lane highway graphics with textured asphalt, shoulders,
+       roadside trees & streetlamps, tire brake marks, exhaust smoke, and HUD gauges.
+     - Custom-designed top-down Player Supercar (headlight beams, glowing red brake
+       lights, blinking turn signals, speed tilt, and supersonic Nitro flames).
+     - Unpredictable Multi-Class Traffic AI (Sedans, Yellow Taxis, Sport Coupes,
+       SUVs, and Heavy Semi-Trucks) that brake for slower cars and signal lane
+       changes in advance using flashing AMBER TURN INDICATORS!
+  2. Asynchronous Background Vision Thread + Companion Camera Monitor (`cv2`):
+     - Runs MediaPipe Hand Pose + Scale-Invariant Fist/Pinch Classification +
+       Pyramidal Lucas-Kanade Optical Flow (`cv2.calcOpticalFlowPyrLK`) off-thread
+       so camera capture NEVER slows down the 60 FPS game loop!
 
-Unit 5 Rendering & Keyboard Controls:
-  [W] Wireframe Rendering  |  [P] Solid Polygon Rendering  |  [L] Cycle 4 Lights
-  [G] Garage Inspect Mode  |  [F] Toggle Optical Flow Trails
-  [R] Restart Race         |  [Arrows / Space / N] Optional Keyboard Drive
-  [Q / ESC] Quit cleanly
+Hand Gesture Controls:
+  * MOVE HAND LEFT / RIGHT : Smoothly steer your Supercar across all 4 lanes
+  * OPEN HAND              : Smooth highway cruise throttle
+  * CLOSE HAND (FIST)      : BRAKE HARD (lights up red brake lamps + tire marks!)
+  * PINCH (Thumb + Index)  : NITRO TURBO BOOST (max speed + 2x score multiplier!)
+  * (Game Over) PINCH      : Restart race hands-free (or press [R])
+
+Keyboard Controls (Always Active Alongside Gestures):
+  [Left/Right or A/D] Steer   |  [Down / S / Space] Brake  |  [Up / W / N] Nitro
+  [C] Toggle Camera Monitor   |  [R] Restart Race          |  [Q / ESC] Quit
 """
 
 from collections import deque
 from dataclasses import dataclass
 import math
+import os
 import random
+import threading
 import time
-from typing import Deque, List, Optional, Tuple
+from typing import Deque, Dict, List, Optional, Tuple
+
+# Position the main 2D game window neatly on the left so the companion camera
+# monitor window sits right beside it on screen without overlapping!
+os.environ.setdefault("SDL_VIDEO_WINDOW_POS", "50,45")
 
 import cv2
 import numpy as np
 import pygame
-from OpenGL.GL import (
-    GL_AMBIENT,
-    GL_AMBIENT_AND_DIFFUSE,
-    GL_BLEND,
-    GL_COLOR_BUFFER_BIT,
-    GL_COLOR_MATERIAL,
-    GL_DEPTH_BUFFER_BIT,
-    GL_DEPTH_TEST,
-    GL_DIFFUSE,
-    GL_FILL,
-    GL_FRONT_AND_BACK,
-    GL_LEQUAL,
-    GL_LIGHT0,
-    GL_LIGHTING,
-    GL_LINE,
-    GL_LINE_SMOOTH,
-    GL_LINE_SMOOTH_HINT,
-    GL_LINES,
-    GL_LINEAR,
-    GL_MODELVIEW,
-    GL_NICEST,
-    GL_NORMALIZE,
-    GL_ONE_MINUS_SRC_ALPHA,
-    GL_POSITION,
-    GL_PROJECTION,
-    GL_QUADS,
-    GL_RGB,
-    GL_SHININESS,
-    GL_SMOOTH,
-    GL_SPECULAR,
-    GL_SRC_ALPHA,
-    GL_TEXTURE_2D,
-    GL_TEXTURE_MAG_FILTER,
-    GL_TEXTURE_MIN_FILTER,
-    GL_TRIANGLES,
-    GL_UNPACK_ALIGNMENT,
-    GL_UNSIGNED_BYTE,
-    glBegin,
-    glBindTexture,
-    glBlendFunc,
-    glClear,
-    glClearDepth,
-    glColor3f,
-    glColor3fv,
-    glColor4f,
-    glColorMaterial,
-    glDeleteTextures,
-    glDepthFunc,
-    glDisable,
-    glEnable,
-    glEnd,
-    glGenTextures,
-    glHint,
-    glLightfv,
-    glLineWidth,
-    glLoadIdentity,
-    glMaterialf,
-    glMaterialfv,
-    glMatrixMode,
-    glNormal3fv,
-    glOrtho,
-    glPixelStorei,
-    glPolygonMode,
-    glPopMatrix,
-    glPushMatrix,
-    glRotatef,
-    glScalef,
-    glShadeModel,
-    glTexCoord2f,
-    glTexImage2D,
-    glTexParameteri,
-    glTexSubImage2D,
-    glTranslatef,
-    glVertex2f,
-    glVertex3f,
-    glVertex3fv,
-    glViewport,
-)
-from OpenGL.GLU import gluPerspective
-from pygame.locals import DOUBLEBUF, KEYDOWN, OPENGL, QUIT
 
-from step1_hand_tracking import (
-    DEFAULT_FRAME_HEIGHT,
-    DEFAULT_FRAME_WIDTH,
-    DEFAULT_PINCH_THRESHOLD_PX,
-    HandGestureData,
-    HandPoseTracker,
-    draw_pinch_overlay,
-    open_webcam,
-)
-from step2_ar_renderer import LIGHTING_PRESETS, LightingPreset
+from step1_hand_tracking import HandGestureData, HandPoseTracker, open_webcam
 
 # ---------------------------------------------------------------------------
-# Constants & Highway Geometry Configuration
+# Display & Highway Layout Constants
 # ---------------------------------------------------------------------------
-WINDOW_WIDTH = 960
-WINDOW_HEIGHT = 720
-FOV_DEGREES = 48.0
+GAME_W = 860
+GAME_H = 760
+TARGET_FPS = 60
 
-LANE_X = (-1.65, 0.0, 1.65)
-ROAD_HALF_WIDTH = 2.65
-CAR_Z = -4.6
-ROAD_Y = -1.55
-SPAWN_Z = -28.0
-DESPAWN_Z = -1.5
+CAM_CAPTURE_W = 480
+CAM_CAPTURE_H = 360
 
-# Landmarks tracked by Lucas-Kanade Optical Flow (wrist, palm & 5 fingertips)
+ROAD_LEFT = 150
+ROAD_RIGHT = 710
+ROAD_W = ROAD_RIGHT - ROAD_LEFT  # 560 px across 4 wide highway lanes
+NUM_LANES = 4
+LANE_W = ROAD_W // NUM_LANES     # 140 px per lane
+LANE_CENTERS = tuple(ROAD_LEFT + LANE_W * i + LANE_W // 2 for i in range(NUM_LANES))
+
+PLAYER_Y = GAME_H - 145
+MIN_SPEED_KMH = 75.0
+CRUISE_SPEED_KMH = 195.0
+NITRO_SPEED_KMH = 305.0
+KMH_TO_PX_PER_SEC = 3.15
+
 LK_LANDMARK_IDS = (0, 4, 5, 8, 9, 12, 13, 16, 17, 20)
-JUMP_FLOW_VY_THRESHOLD = -13.5  # Upward optical-flow velocity (px/frame) to trigger jump
+CAM_WINDOW_TITLE = "AeroDrive - Gesture & Optical Flow Monitor"
 
 
 # ---------------------------------------------------------------------------
-# Pyramidal Lucas-Kanade Optical Flow Tracker (`cv2.calcOpticalFlowPyrLK`)
+# Scale-Invariant Hand Gesture & Lucas-Kanade Optical Flow Worker Thread
 # ---------------------------------------------------------------------------
-class LucasKanadeFlowTracker:
-    """
-    Computes sparse Pyramidal Lucas-Kanade Optical Flow (`cv2.calcOpticalFlowPyrLK`)
-    across tracked hand landmarks and draws glowing motion vector trails.
-    """
+@dataclass
+class GestureControlSnapshot:
+    """Thread-safe snapshot passed from Vision Thread -> 60 FPS Game Loop."""
 
-    def __init__(self, trail_length: int = 14) -> None:
-        self.lk_params = dict(
-            winSize=(21, 21),
+    hand_detected: bool = False
+    steer_target: float = 0.0   # Normalized [-1.0 .. +1.0] across highway width
+    is_braking: bool = False    # Closed Fist -> Brake!
+    is_nitro: bool = False      # Thumb + Index Pinch (fingers open) -> Nitro!
+    flow_vx: float = 0.0        # Lucas-Kanade horizontal velocity (px/frame)
+    flow_speed: float = 0.0     # Lucas-Kanade total speed magnitude (px/frame)
+    gesture_name: str = "NO HAND"
+    cam_fps: float = 0.0
+
+
+def classify_driving_gesture(
+    hand: HandGestureData, frame_w: int
+) -> Tuple[bool, bool, float, str]:
+    """
+    Scale-invariant classification of:
+      1. FIST  -> BRAKE (3+ non-thumb fingers curled into palm)
+      2. PINCH -> NITRO BOOST (Thumb [4] + Index [8] close while other fingers extended)
+      3. OPEN  -> CRUISE THROTTLE
+    Also maps palm center smoothly to normalized road steering `[-1.0, +1.0]`.
+    """
+    lms = hand.landmarks_px
+    wrist_x, wrist_y = lms[0]
+    mid_mcp_x, mid_mcp_y = lms[9]
+    palm_size = max(25.0, math.hypot(mid_mcp_x - wrist_x, mid_mcp_y - wrist_y))
+
+    def dist_to_wrist(idx: int) -> float:
+        return math.hypot(lms[idx][0] - wrist_x, lms[idx][1] - wrist_y)
+
+    # Check finger curl on Index (8 vs 6), Middle (12 vs 10), Ring (16 vs 14), Pinky (20 vs 18)
+    finger_pairs = ((8, 6), (12, 10), (16, 14), (20, 18))
+    curled_flags = [
+        dist_to_wrist(tip_i) < 1.12 * dist_to_wrist(pip_i)
+        for tip_i, pip_i in finger_pairs
+    ]
+    total_curled = sum(curled_flags)
+    non_index_curled = sum(curled_flags[1:])  # Middle, Ring, Pinky
+
+    # Priority 1: Closed Fist -> Reliable Distance-Independent Brake!
+    if total_curled >= 3:
+        is_braking = True
+        is_nitro = False
+        label = "BRAKE (FIST)"
+    # Priority 2: Thumb + Index Pinch with outer fingers extended -> Nitro Boost!
+    elif hand.distance_px < 0.52 * palm_size and non_index_curled <= 1:
+        is_braking = False
+        is_nitro = True
+        label = "NITRO (PINCH)"
+    else:
+        is_braking = False
+        is_nitro = False
+        label = "CRUISE (OPEN)"
+
+    # Use stable palm anchor (average of Wrist [0], Index MCP [5], Pinky MCP [17])
+    # so closing fist or pinching NEVER shifts steering sideways!
+    palm_cx = (lms[0][0] + lms[5][0] + lms[9][0] + lms[17][0]) * 0.25
+    raw_norm = (palm_cx / float(frame_w) - 0.5) / 0.30
+    steer = max(-1.0, min(1.0, raw_norm))
+    return is_braking, is_nitro, steer, label
+
+
+class AsyncVisionWorker:
+    """Runs Webcam + MediaPipe + Lucas-Kanade Optical Flow on a dedicated daemon thread."""
+
+    def __init__(self, camera_index: int = 0) -> None:
+        self._camera_index = camera_index
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._snapshot = GestureControlSnapshot()
+        self._latest_cam_bgr: Optional[np.ndarray] = None
+        self._frame_seq: int = 0
+        self.init_error: Optional[str] = None
+        self._ready = threading.Event()
+
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
+        self._ready.wait(timeout=8.0)
+
+    def get_latest(self) -> Tuple[GestureControlSnapshot, Optional[np.ndarray], int]:
+        with self._lock:
+            return self._snapshot, self._latest_cam_bgr, self._frame_seq
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        self._thread.join(timeout=2.5)
+
+    def _run_loop(self) -> None:
+        try:
+            cap = open_webcam(self._camera_index)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_CAPTURE_W)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_CAPTURE_H)
+            tracker = HandPoseTracker(
+                max_num_hands=1,
+                min_detection_confidence=0.55,
+                min_tracking_confidence=0.55,
+            )
+        except Exception as exc:  # pragma: no cover - hardware fallback safety
+            self.init_error = str(exc)
+            self._ready.set()
+            return
+
+        self._ready.set()
+
+        lk_params = dict(
+            winSize=(19, 19),
             maxLevel=3,
-            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 15, 0.03),
+            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 12, 0.03),
         )
-        self.prev_gray: Optional[np.ndarray] = None
-        self.prev_pts: Optional[np.ndarray] = None
-        self.trails: List[Deque[Tuple[int, int]]] = [
-            deque(maxlen=trail_length) for _ in LK_LANDMARK_IDS
+        prev_gray: Optional[np.ndarray] = None
+        prev_pts: Optional[np.ndarray] = None
+        trails: List[Deque[Tuple[int, int]]] = [
+            deque(maxlen=10) for _ in LK_LANDMARK_IDS
         ]
-        self.velocity_xy: Tuple[float, float] = (0.0, 0.0)
-        self.speed_px: float = 0.0
 
-    def update(
-        self, raw_frame_bgr: np.ndarray, hands: List[HandGestureData]
-    ) -> Tuple[float, float]:
-        """Run `cv2.calcOpticalFlowPyrLK` between consecutive grayscale frames."""
-        curr_gray = cv2.cvtColor(raw_frame_bgr, cv2.COLOR_BGR2GRAY)
+        smoothed_steer = 0.0
+        cam_fps = 30.0
+        prev_t = time.perf_counter()
 
-        if not hands:
-            self.prev_gray = curr_gray
-            self.prev_pts = None
-            for trail in self.trails:
-                if trail:
-                    trail.popleft()
-            self.velocity_xy = (0.0, 0.0)
-            self.speed_px = 0.0
-            return self.velocity_xy
+        try:
+            while not self._stop_event.is_set():
+                ok, frame = cap.read()
+                if not ok:
+                    time.sleep(0.005)
+                    continue
 
-        hand = hands[0]
-        anchor_pts = np.array(
-            [hand.landmarks_px[idx] for idx in LK_LANDMARK_IDS], dtype=np.float32
-        ).reshape(-1, 1, 2)
+                now = time.perf_counter()
+                dt = max(now - prev_t, 1e-4)
+                cam_fps = 0.85 * cam_fps + 0.15 * (1.0 / dt)
+                prev_t = now
 
-        vx, vy = 0.0, 0.0
-        if self.prev_gray is not None and self.prev_pts is not None:
-            next_pts, status, _ = cv2.calcOpticalFlowPyrLK(
-                self.prev_gray, curr_gray, self.prev_pts, None, **self.lk_params
-            )
-            if next_pts is not None and status is not None:
-                valid_mask = status.reshape(-1) == 1
-                if np.any(valid_mask):
-                    deltas = (
-                        next_pts[valid_mask].reshape(-1, 2)
-                        - self.prev_pts[valid_mask].reshape(-1, 2)
+                frame = cv2.flip(frame, 1)
+                fh, fw = frame.shape[:2]
+                curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+                hands = tracker.process(frame, draw_skeleton=False)
+                vx, vy = 0.0, 0.0
+
+                if hands:
+                    hand = hands[0]
+                    anchor_pts = np.array(
+                        [hand.landmarks_px[idx] for idx in LK_LANDMARK_IDS],
+                        dtype=np.float32,
+                    ).reshape(-1, 1, 2)
+
+                    if (
+                        prev_gray is not None
+                        and prev_pts is not None
+                        and prev_gray.shape == curr_gray.shape
+                    ):
+                        next_pts, status, _ = cv2.calcOpticalFlowPyrLK(
+                            prev_gray, curr_gray, prev_pts, None, **lk_params
+                        )
+                        if next_pts is not None and status is not None:
+                            valid = status.reshape(-1) == 1
+                            if np.any(valid):
+                                diff = (
+                                    next_pts[valid].reshape(-1, 2)
+                                    - prev_pts[valid].reshape(-1, 2)
+                                )
+                                vx = float(np.mean(diff[:, 0]))
+                                vy = float(np.mean(diff[:, 1]))
+                                anchor_pts[valid] = (
+                                    0.65 * next_pts[valid] + 0.35 * anchor_pts[valid]
+                                )
+
+                    for t_i, pt in enumerate(anchor_pts.reshape(-1, 2)):
+                        trails[t_i].append((int(round(float(pt[0]))), int(round(float(pt[1])))))
+                    prev_pts = anchor_pts
+
+                    is_brake, is_nitro, raw_steer, label = classify_driving_gesture(
+                        hand, fw
                     )
-                    vx = float(np.mean(deltas[:, 0]))
-                    vy = float(np.mean(deltas[:, 1]))
+                    # Fuse optical-flow velocity lead with palm position for crisp zero-lag feel
+                    lead_steer = max(-1.0, min(1.0, raw_steer + vx * 0.014))
+                    smoothed_steer += (lead_steer - smoothed_steer) * 0.45
 
-                    # Blend LK-propagated points with fresh MediaPipe anchors (70/30)
-                    blended = anchor_pts.copy()
-                    blended[valid_mask] = (
-                        0.65 * next_pts[valid_mask] + 0.35 * anchor_pts[valid_mask]
+                    snap = GestureControlSnapshot(
+                        hand_detected=True,
+                        steer_target=smoothed_steer,
+                        is_braking=is_brake,
+                        is_nitro=is_nitro,
+                        flow_vx=vx,
+                        flow_speed=math.hypot(vx, vy),
+                        gesture_name=label,
+                        cam_fps=cam_fps,
                     )
-                    anchor_pts = blended
+                else:
+                    prev_pts = None
+                    for tr in trails:
+                        if tr:
+                            tr.popleft()
+                    snap = GestureControlSnapshot(
+                        hand_detected=False,
+                        steer_target=smoothed_steer,
+                        gesture_name="NO HAND (Keyboard Ready)",
+                        cam_fps=cam_fps,
+                    )
 
-        for idx, pt in enumerate(anchor_pts.reshape(-1, 2)):
-            px = int(round(float(pt[0])))
-            py = int(round(float(pt[1])))
-            self.trails[idx].append((px, py))
+                prev_gray = curr_gray
 
-        self.prev_gray = curr_gray
-        self.prev_pts = anchor_pts
-        self.velocity_xy = (vx, vy)
-        self.speed_px = math.hypot(vx, vy)
-        return self.velocity_xy
+                # Build clean annotated monitor image on worker thread
+                vis = frame.copy()
+                draw_camera_monitor_overlay(vis, tracker, hands, trails, snap)
 
-    def draw_trails(self, frame_bgr: np.ndarray) -> None:
-        """Draw glowing multi-segment motion trails & live velocity vector arrow."""
-        for trail_idx, trail in enumerate(self.trails):
-            pts = list(trail)
-            if len(pts) < 2:
-                continue
-            is_fingertip = trail_idx in (1, 3)  # Thumb tip & Index tip
-            for i in range(1, len(pts)):
-                ratio = i / float(len(pts))
-                thickness = max(1, int(round(ratio * (4 if is_fingertip else 2.5))))
-                color = (
-                    int(255 * (1.0 - 0.5 * ratio)),
-                    int(120 + 135 * ratio),
-                    int(255 * ratio),
-                )
-                cv2.line(frame_bgr, pts[i - 1], pts[i], color, thickness, cv2.LINE_AA)
-
-        # Draw resultant optical-flow velocity vector arrow from palm center (trail 4)
-        palm_trail = self.trails[4]
-        if palm_trail and self.speed_px > 2.0:
-            ox, oy = palm_trail[-1]
-            vx, vy = self.velocity_xy
-            ex = int(round(ox + vx * 4.0))
-            ey = int(round(oy + vy * 4.0))
-            cv2.arrowedLine(
-                frame_bgr,
-                (ox, oy),
-                (ex, ey),
-                (0, 255, 180),
-                3,
-                cv2.LINE_AA,
-                tipLength=0.28,
-            )
+                with self._lock:
+                    self._snapshot = snap
+                    self._latest_cam_bgr = vis
+                    self._frame_seq += 1
+        finally:
+            tracker.close()
+            cap.release()
 
 
-# ---------------------------------------------------------------------------
-# Low-Level 3D OpenGL Primitive Helpers (Sports Car, Barriers, Gems, Sparks)
-# ---------------------------------------------------------------------------
-def draw_unit_box(
-    sx: float, sy: float, sz: float, color: Tuple[float, float, float]
+def draw_camera_monitor_overlay(
+    vis: np.ndarray,
+    tracker: HandPoseTracker,
+    hands: List[HandGestureData],
+    trails: List[Deque[Tuple[int, int]]],
+    snap: GestureControlSnapshot,
 ) -> None:
-    """Draw a lit 3D rectangular prism of half-extents `(sx, sy, sz)` with normals."""
-    v = (
-        (-sx, -sy,  sz),
-        ( sx, -sy,  sz),
-        ( sx,  sy,  sz),
-        (-sx,  sy,  sz),
-        (-sx, -sy, -sz),
-        ( sx, -sy, -sz),
-        ( sx,  sy, -sz),
-        (-sx,  sy, -sz),
+    """Annotate the separate OpenCV Camera Monitor window clearly."""
+    h, w = vis.shape[:2]
+
+    # Subtle vertical lane guide lines showing active steering zone
+    left_guide = int(w * 0.20)
+    right_guide = int(w * 0.80)
+    cv2.line(vis, (left_guide, 54), (left_guide, h - 30), (70, 90, 110), 1)
+    cv2.line(vis, (right_guide, 54), (right_guide, h - 30), (70, 90, 110), 1)
+    cv2.line(vis, (w // 2, 54), (w // 2, h - 30), (55, 70, 85), 1)
+
+    # Lucas-Kanade Optical Flow trails
+    for tr in trails:
+        pts = list(tr)
+        for i in range(1, len(pts)):
+            ratio = i / float(len(pts))
+            col = (int(255 * (1.0 - 0.5 * ratio)), int(140 + 115 * ratio), int(255 * ratio))
+            cv2.line(vis, pts[i - 1], pts[i], col, max(1, int(round(2.5 * ratio))), cv2.LINE_AA)
+
+    tracker.draw_landmarks_on_frame(vis)
+
+    # Header status banner
+    cv2.rectangle(vis, (0, 0), (w, 50), (18, 22, 30), cv2.FILLED)
+    badge_col = (
+        (60, 80, 255)
+        if snap.is_braking
+        else ((0, 255, 190) if snap.is_nitro else (90, 220, 255))
     )
-    faces = (
-        ((0, 1, 2, 3), ( 0.0,  0.0,  1.0), color),
-        ((5, 4, 7, 6), ( 0.0,  0.0, -1.0), color),
-        ((3, 2, 6, 7), ( 0.0,  1.0,  0.0), tuple(min(1.0, c * 1.15) for c in color)),
-        ((4, 5, 1, 0), ( 0.0, -1.0,  0.0), tuple(c * 0.65 for c in color)),
-        ((1, 5, 6, 2), ( 1.0,  0.0,  0.0), tuple(c * 0.88 for c in color)),
-        ((4, 0, 3, 7), (-1.0,  0.0,  0.0), tuple(c * 0.88 for c in color)),
+    cv2.putText(
+        vis,
+        f"Mode: {snap.gesture_name}",
+        (10, 21),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.54,
+        badge_col,
+        2,
+        cv2.LINE_AA,
     )
-    glBegin(GL_QUADS)
-    for idxs, normal, face_col in faces:
-        glNormal3fv(normal)
-        glColor3fv(face_col)
-        for idx in idxs:
-            glVertex3fv(v[idx])
-    glEnd()
-
-
-def draw_sports_car(wheel_spin_deg: float, nitro_active: bool) -> None:
-    """Render a multi-part 3D OpenGL Cyber Sports Car with spinning wheels & exhaust."""
-    body_color = (0.08, 0.72, 1.00) if not nitro_active else (0.15, 0.95, 0.85)
-    trim_color = (1.00, 0.25, 0.62)
-
-    # 1. Lower aerodynamic main chassis
-    glPushMatrix()
-    glTranslatef(0.0, 0.20, 0.0)
-    draw_unit_box(0.52, 0.14, 0.98, body_color)
-    glPopMatrix()
-
-    # 2. Neon side skirts
-    for side in (-0.54, 0.54):
-        glPushMatrix()
-        glTranslatef(side, 0.10, 0.0)
-        draw_unit_box(0.04, 0.05, 0.88, trim_color)
-        glPopMatrix()
-
-    # 3. Sleek cockpit cabin
-    glPushMatrix()
-    glTranslatef(0.0, 0.42, -0.05)
-    draw_unit_box(0.38, 0.13, 0.48, (0.14, 0.20, 0.34))
-    glPopMatrix()
-
-    # 4. Rear racing spoiler wing + struts
-    for strut_x in (-0.36, 0.36):
-        glPushMatrix()
-        glTranslatef(strut_x, 0.40, 0.82)
-        draw_unit_box(0.04, 0.10, 0.06, trim_color)
-        glPopMatrix()
-    glPushMatrix()
-    glTranslatef(0.0, 0.50, 0.84)
-    draw_unit_box(0.50, 0.035, 0.14, trim_color)
-    glPopMatrix()
-
-    # 5. Twin glowing rear taillights & front headlights
-    for lx in (-0.34, 0.34):
-        glPushMatrix()
-        glTranslatef(lx, 0.22, 0.99)
-        draw_unit_box(0.11, 0.045, 0.02, (1.0, 0.18, 0.25))
-        glPopMatrix()
-
-        glPushMatrix()
-        glTranslatef(lx, 0.21, -0.99)
-        draw_unit_box(0.11, 0.045, 0.02, (0.85, 0.98, 1.0))
-        glPopMatrix()
-
-    # 6. Four rotating 3D wheels
-    wheel_offsets = (
-        (-0.56, 0.14, -0.62),
-        ( 0.56, 0.14, -0.62),
-        (-0.56, 0.14,  0.62),
-        ( 0.56, 0.14,  0.62),
+    cv2.putText(
+        vis,
+        f"LK Flow: {snap.flow_speed:4.1f} px/f  |  Cam FPS: {snap.cam_fps:3.0f}",
+        (10, 42),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.41,
+        (210, 225, 240),
+        1,
+        cv2.LINE_AA,
     )
-    for wx, wy, wz in wheel_offsets:
-        glPushMatrix()
-        glTranslatef(wx, wy, wz)
-        glRotatef(wheel_spin_deg, 1.0, 0.0, 0.0)
-        draw_unit_box(0.09, 0.14, 0.14, (0.16, 0.18, 0.22))
-        draw_unit_box(0.10, 0.07, 0.07, (0.85, 0.92, 1.00))
-        glPopMatrix()
 
-    # 7. Twin 3D Nitro Turbo Exhaust Flames when Pinching!
-    if nitro_active:
-        flicker = 0.38 + 0.16 * abs(math.sin(time.perf_counter() * 28.0))
-        for fx in (-0.24, 0.24):
-            glPushMatrix()
-            glTranslatef(fx, 0.16, 1.02 + flicker * 0.5)
-            glBegin(GL_TRIANGLES)
-            glNormal3fv((0.0, 1.0, 0.0))
-            glColor3f(0.20, 1.00, 1.00)
-            glVertex3f(-0.11, 0.0, -flicker * 0.5)
-            glVertex3f( 0.11, 0.0, -flicker * 0.5)
-            glColor3f(1.00, 0.30, 0.90)
-            glVertex3f( 0.00, 0.02, flicker)
-            glEnd()
-            glPopMatrix()
-
-
-def draw_energy_crystal(spin_deg: float) -> None:
-    """Render a glowing rotating 3D octahedral crystal pickup."""
-    glPushMatrix()
-    glRotatef(spin_deg, 0.0, 1.0, 0.0)
-    glRotatef(25.0, 0.0, 0.0, 1.0)
-    top = (0.0, 0.42, 0.0)
-    bot = (0.0, -0.42, 0.0)
-    ring = (
-        (-0.30, 0.0,  0.30),
-        ( 0.30, 0.0,  0.30),
-        ( 0.30, 0.0, -0.30),
-        (-0.30, 0.0, -0.30),
-    )
-    glBegin(GL_TRIANGLES)
-    for i in range(4):
-        a = ring[i]
-        b = ring[(i + 1) % 4]
-        glNormal3fv((0.0, 0.6, 0.8))
-        glColor3f(0.15, 0.98, 0.72)
-        glVertex3fv(top)
-        glVertex3fv(a)
-        glVertex3fv(b)
-
-        glNormal3fv((0.0, -0.6, 0.8))
-        glColor3f(0.10, 0.72, 1.00)
-        glVertex3fv(bot)
-        glVertex3fv(b)
-        glVertex3fv(a)
-    glEnd()
-    glPopMatrix()
-
-
-def draw_hazard_barrier() -> None:
-    """Render a high-contrast 3D neon-crimson highway barrier block + warning stripe."""
-    glPushMatrix()
-    glTranslatef(0.0, 0.30, 0.0)
-    draw_unit_box(0.56, 0.30, 0.30, (0.98, 0.20, 0.28))
-    glTranslatef(0.0, 0.05, 0.31)
-    draw_unit_box(0.46, 0.09, 0.02, (1.00, 0.86, 0.18))
-    glPopMatrix()
+    # Bottom steering bar
+    cv2.rectangle(vis, (0, h - 26), (w, h), (18, 22, 30), cv2.FILLED)
+    bx1, bx2, by = 60, w - 60, h - 13
+    cv2.line(vis, (bx1, by), (bx2, by), (80, 100, 130), 3)
+    kx = int(round(bx1 + (snap.steer_target + 1.0) * 0.5 * (bx2 - bx1)))
+    cv2.circle(vis, (kx, by), 7, badge_col, cv2.FILLED)
 
 
 # ---------------------------------------------------------------------------
-# Game Entities & State Machine
+# Procedural High-Detail Top-Down 2D Vehicle Sprite Factory
+# ---------------------------------------------------------------------------
+class VehicleSpriteBank:
+    """Pre-renders crisp, high-detail top-down 2D cars & trucks once at startup."""
+
+    def __init__(self) -> None:
+        self.player_base = self._build_supercar_surface()
+        self.rotation_cache: Dict[int, pygame.Surface] = {}
+        self.traffic_surfaces: Dict[Tuple[str, Tuple[int, int, int]], pygame.Surface] = {}
+
+        palettes = {
+            "SEDAN": [
+                (225, 65, 75),
+                (65, 135, 235),
+                (230, 235, 242),
+                (52, 185, 125),
+            ],
+            "TAXI": [(248, 202, 38)],
+            "COUPE": [(255, 115, 42), (168, 82, 245), (38, 212, 225)],
+            "SUV": [(78, 92, 112), (212, 218, 226), (165, 58, 68)],
+            "TRUCK": [(215, 222, 232), (82, 130, 188)],
+        }
+        for kind, colors in palettes.items():
+            for col in colors:
+                self.traffic_surfaces[(kind, col)] = self._build_traffic_surface(
+                    kind, col
+                )
+        self.palettes = palettes
+
+    def get_rotated_player(self, angle_deg: float) -> pygame.Surface:
+        quant = int(round(max(-16.0, min(16.0, angle_deg)) * 2.0))
+        surf = self.rotation_cache.get(quant)
+        if surf is None:
+            surf = pygame.transform.rotozoom(self.player_base, -quant * 0.5, 1.0)
+            self.rotation_cache[quant] = surf
+        return surf
+
+    @staticmethod
+    def _build_supercar_surface() -> pygame.Surface:
+        """Design a sleek top-down Hero Supercar with racing stripes & aero details."""
+        w, h = 68, 122
+        s = pygame.Surface((w, h), pygame.SRCALPHA)
+
+        # Soft drop shadow
+        pygame.draw.rect(s, (0, 0, 0, 85), (6, 8, w - 8, h - 8), border_radius=18)
+
+        # Four dark sport tires protruding subtly from wheel arches
+        for wx, wy in ((3, 18), (w - 11, 18), (3, h - 38), (w - 11, h - 38)):
+            pygame.draw.rect(s, (22, 25, 30), (wx, wy, 8, 22), border_radius=3)
+            pygame.draw.line(s, (90, 100, 115), (wx + 2, wy + 4), (wx + 2, wy + 18), 1)
+
+        # Sculpted main body shell (Pearl Electric Cyan)
+        body_rect = pygame.Rect(8, 4, w - 16, h - 10)
+        pygame.draw.rect(s, (18, 188, 242), body_rect, border_radius=17)
+
+        # Metallic side contour highlights
+        pygame.draw.rect(s, (125, 235, 255), (11, 10, w - 22, h - 22), width=2, border_radius=14)
+
+        # Twin carbon-navy center racing stripes
+        pygame.draw.rect(s, (18, 28, 46), (w // 2 - 8, 5, 6, h - 12))
+        pygame.draw.rect(s, (18, 28, 46), (w // 2 + 2, 5, 6, h - 12))
+
+        # Front carbon splitter lip & hood vents
+        pygame.draw.rect(s, (25, 30, 38), (14, 3, w - 28, 5), border_radius=3)
+        pygame.draw.polygon(s, (20, 32, 48), [(20, 24), (w - 20, 24), (w - 24, 31), (24, 31)])
+
+        # Tinted wraparound windshield + cockpit glass roof
+        pygame.draw.polygon(
+            s,
+            (24, 38, 58),
+            [(14, 42), (w - 14, 42), (w - 18, 29), (18, 29)],
+        )
+        pygame.draw.line(s, (165, 230, 255), (19, 31), (w - 19, 31), 2)
+        pygame.draw.rect(s, (16, 24, 38), (16, 42, w - 32, 34), border_radius=6)
+
+        # Rear engine louvers & carbon rear spoiler wing
+        for ly in range(82, 98, 5):
+            pygame.draw.line(s, (24, 34, 48), (20, ly), (w - 20, ly), 2)
+        pygame.draw.rect(s, (22, 26, 36), (9, h - 15, w - 18, 7), border_radius=3)
+        pygame.draw.rect(s, (255, 65, 125), (10, h - 14, w - 20, 2))
+
+        # Side mirrors
+        pygame.draw.polygon(s, (18, 188, 242), [(8, 36), (2, 39), (8, 42)])
+        pygame.draw.polygon(s, (18, 188, 242), [(w - 8, 36), (w - 2, 39), (w - 8, 42)])
+
+        # Crisp front xenon headlamp lenses & rear LED tail strip
+        pygame.draw.ellipse(s, (235, 252, 255), (12, 6, 11, 7))
+        pygame.draw.ellipse(s, (235, 252, 255), (w - 23, 6, 11, 7))
+        pygame.draw.rect(s, (185, 30, 48), (12, h - 9, 14, 4), border_radius=2)
+        pygame.draw.rect(s, (185, 30, 48), (w - 26, h - 9, 14, 4), border_radius=2)
+        return s
+
+    @staticmethod
+    def _build_traffic_surface(
+        kind: str, body_col: Tuple[int, int, int]
+    ) -> pygame.Surface:
+        """Design distinct top-down traffic vehicles: Sedan, Taxi, Coupe, SUV, Semi-Truck."""
+        dims = {
+            "SEDAN": (62, 112),
+            "TAXI": (62, 112),
+            "COUPE": (60, 108),
+            "SUV": (68, 124),
+            "TRUCK": (76, 198),
+        }
+        w, h = dims[kind]
+        s = pygame.Surface((w, h), pygame.SRCALPHA)
+        pygame.draw.rect(s, (0, 0, 0, 80), (5, 7, w - 6, h - 6), border_radius=12)
+
+        dark_col = tuple(max(0, int(c * 0.68)) for c in body_col)
+        light_col = tuple(min(255, int(c * 1.18) + 18) for c in body_col)
+
+        if kind == "TRUCK":
+            # Wheels along cab + double rear axle
+            for wy in (20, 62, h - 54, h - 28):
+                pygame.draw.rect(s, (24, 26, 30), (3, wy, 7, 19), border_radius=2)
+                pygame.draw.rect(s, (24, 26, 30), (w - 10, wy, 7, 19), border_radius=2)
+            # Tractor cab at front
+            pygame.draw.rect(s, body_col, (9, 5, w - 18, 52), border_radius=10)
+            pygame.draw.rect(s, (34, 48, 66), (13, 14, w - 26, 15), border_radius=4)
+            # Hitch bar + long ribbed cargo box trailer
+            pygame.draw.rect(s, (45, 50, 58), (w // 2 - 8, 55, 16, 12))
+            pygame.draw.rect(s, (236, 240, 246), (7, 64, w - 14, h - 70), border_radius=6)
+            pygame.draw.rect(s, body_col, (10, 68, w - 20, h - 78), width=3, border_radius=4)
+            for ry in range(80, h - 18, 18):
+                pygame.draw.line(s, (205, 212, 222), (10, ry), (w - 10, ry), 2)
+        else:
+            for wx, wy in ((3, 17), (w - 10, 17), (3, h - 35), (w - 10, h - 35)):
+                pygame.draw.rect(s, (24, 26, 30), (wx, wy, 7, 20), border_radius=3)
+
+            rad = 16 if kind == "COUPE" else 13
+            pygame.draw.rect(s, body_col, (8, 4, w - 16, h - 8), border_radius=rad)
+            pygame.draw.rect(s, light_col, (11, 9, w - 22, h - 18), width=2, border_radius=rad - 2)
+
+            if kind == "COUPE":
+                pygame.draw.rect(s, (245, 248, 255), (w // 2 - 3, 5, 6, h - 10))
+
+            # Front & rear windshields + roof panel
+            pygame.draw.polygon(
+                s, (30, 44, 62), [(13, 40), (w - 13, 40), (w - 16, 26), (16, 26)]
+            )
+            pygame.draw.rect(s, dark_col, (14, 40, w - 28, h - 74), border_radius=5)
+            pygame.draw.polygon(
+                s,
+                (30, 44, 62),
+                [(15, h - 34), (w - 15, h - 34), (w - 13, h - 22), (13, h - 22)],
+            )
+
+            if kind == "TAXI":
+                # Iconic black/white taxi sign on roof
+                pygame.draw.rect(s, (22, 24, 28), (w // 2 - 13, h // 2 - 6, 26, 11), border_radius=3)
+                pygame.draw.rect(s, (255, 245, 190), (w // 2 - 9, h // 2 - 4, 18, 7), border_radius=2)
+            elif kind == "SUV":
+                # Roof rails + panoramic sunroof
+                pygame.draw.line(s, (215, 222, 232), (15, 34), (15, h - 26), 2)
+                pygame.draw.line(s, (215, 222, 232), (w - 15, 34), (w - 15, h - 26), 2)
+                pygame.draw.rect(s, (25, 35, 48), (19, 45, w - 38, 26), border_radius=4)
+
+        # Headlights & dim tail lamps
+        pygame.draw.rect(s, (245, 250, 235), (12, 5, 10, 4), border_radius=2)
+        pygame.draw.rect(s, (245, 250, 235), (w - 22, 5, 10, 4), border_radius=2)
+        pygame.draw.rect(s, (165, 28, 38), (11, h - 8, 12, 4), border_radius=2)
+        pygame.draw.rect(s, (165, 28, 38), (w - 23, h - 8, 12, 4), border_radius=2)
+        return s
+
+
+# ---------------------------------------------------------------------------
+# Traffic Vehicle AI & Visual FX Entities
 # ---------------------------------------------------------------------------
 @dataclass
-class RoadEntity:
-    kind: str  # "BARRIER" or "CRYSTAL"
+class TrafficCar:
+    kind: str
+    color: Tuple[int, int, int]
+    surface: pygame.Surface
     lane: int
-    z: float
-    spin: float = 0.0
-    active: bool = True
-
-
-@dataclass
-class SparkParticle:
+    target_lane: int
     x: float
     y: float
-    z: float
+    base_speed_kmh: float
+    speed_kmh: float
+    aggression: float
+    decision_timer: float
+    blinker_dir: int = 0          # -1 = left indicator, +1 = right indicator, 0 = off
+    signal_lead_timer: float = 0.0
+    is_merging: bool = False
+    is_braking: bool = False
+    heading_deg: float = 0.0
+    passed_awarded: bool = False
+
+    @property
+    def width(self) -> int:
+        return self.surface.get_width()
+
+    @property
+    def height(self) -> int:
+        return self.surface.get_height()
+
+    def hitbox(self) -> pygame.Rect:
+        pad_x, pad_y = 9, 8
+        return pygame.Rect(
+            int(self.x - self.width * 0.5) + pad_x,
+            int(self.y - self.height * 0.5) + pad_y,
+            self.width - 2 * pad_x,
+            self.height - 2 * pad_y,
+        )
+
+
+@dataclass
+class FloatingPopup:
+    text: str
+    x: float
+    y: float
+    color: Tuple[int, int, int]
+    timer: float = 0.95
+
+
+@dataclass
+class SkidSegment:
+    x: float
+    y: float
+
+
+@dataclass
+class SmokePuff:
+    x: float
+    y: float
     vx: float
     vy: float
-    vz: float
-    color: Tuple[float, float, float]
-    life: float = 0.55
+    radius: float
+    color: Tuple[int, int, int]
+    life: float = 0.42
 
 
-class AeroDriveEngine:
-    """Full 3D OpenGL Highway Racer + Garage Rubric Inspector."""
+# ---------------------------------------------------------------------------
+# Main Top-Down 2D Highway Traffic Game State
+# ---------------------------------------------------------------------------
+class TopDownTrafficGame:
+    """Manages road scrolling, unpredictable blinking traffic AI, collisions & HUD."""
 
-    def __init__(self, frame_width: int, frame_height: int) -> None:
-        self.frame_width = frame_width
-        self.frame_height = frame_height
+    def __init__(self, sprites: VehicleSpriteBank) -> None:
+        self.sprites = sprites
+        self.tile_h = 240
+        self.road_tile = self._bake_road_tile(self.tile_h)
+        self.headlight_cone = self._bake_headlight_cone()
 
-        # Unit 5 Rendering states
-        self.wireframe_mode: bool = False
-        self.lighting_index: int = 0
-        self.garage_mode: bool = False  # [G] toggles close-up 3D Scale/Rotate mode
-
-        # Garage inspect state
-        self.garage_scale: float = 1.0
-        self.garage_rot_x: float = 18.0
-        self.garage_rot_y: float = -32.0
-
-        # OpenGL initialization
-        glViewport(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT)
-        glClearDepth(1.0)
-        glDepthFunc(GL_LEQUAL)
-        glShadeModel(GL_SMOOTH)
-        glEnable(GL_NORMALIZE)
-        glEnable(GL_BLEND)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-        glEnable(GL_LINE_SMOOTH)
-        glHint(GL_LINE_SMOOTH_HINT, GL_NICEST)
-        glLineWidth(2.2)
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
-
-        self.bg_texture_id = int(glGenTextures(1))
-        glBindTexture(GL_TEXTURE_2D, self.bg_texture_id)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
-        empty_rgb = np.zeros((frame_height, frame_width, 3), dtype=np.uint8)
-        glTexImage2D(
-            GL_TEXTURE_2D,
-            0,
-            GL_RGB,
-            frame_width,
-            frame_height,
-            0,
-            GL_RGB,
-            GL_UNSIGNED_BYTE,
-            empty_rgb,
-        )
-        glBindTexture(GL_TEXTURE_2D, 0)
+        self.font_hud = pygame.font.SysFont("consolas", 20, bold=True)
+        self.font_big = pygame.font.SysFont("consolas", 36, bold=True)
+        self.font_small = pygame.font.SysFont("consolas", 15, bold=True)
 
         self.best_score: int = 0
-        self.reset_race()
+        self.scenery_items: List[Tuple[float, float, str]] = []
+        for sy in range(0, GAME_H + 120, 95):
+            self._spawn_scenery_row(float(sy))
 
-    def reset_race(self) -> None:
-        """Reset highway race state for a fresh run."""
-        self.score: int = 0
-        self.combo: int = 1
+        self.reset()
+
+    @staticmethod
+    def _bake_road_tile(tile_h: int) -> pygame.Surface:
+        """Pre-bake crisp textured asphalt, rumble strips & lush grass shoulders."""
+        surf = pygame.Surface((GAME_W, tile_h))
+        surf.fill((34, 68, 42))  # Rich roadside turf
+
+        # Subtle grass texture stripes
+        for gy in range(0, tile_h, 24):
+            pygame.draw.rect(surf, (30, 62, 38), (0, gy, ROAD_LEFT, 12))
+            pygame.draw.rect(surf, (30, 62, 38), (ROAD_RIGHT, gy, GAME_W - ROAD_RIGHT, 12))
+
+        # Concrete shoulder kerbs
+        pygame.draw.rect(surf, (62, 66, 76), (ROAD_LEFT - 20, 0, ROAD_W + 40, tile_h))
+
+        # Main 4-lane asphalt surface
+        pygame.draw.rect(surf, (40, 44, 52), (ROAD_LEFT, 0, ROAD_W, tile_h))
+
+        # Crisp asphalt micro-grain (deterministic RNG so tile seams match cleanly)
+        rng = random.Random(42)
+        for _ in range(420):
+            gx = rng.randint(ROAD_LEFT + 4, ROAD_RIGHT - 5)
+            gy = rng.randint(0, tile_h - 1)
+            shade = rng.choice((34, 48, 55))
+            surf.set_at((gx, gy), (shade, shade + 3, shade + 9))
+
+        # Red-and-white racing kerb rumble strips on left & right shoulders
+        stripe_h = 30
+        for idx, sy in enumerate(range(0, tile_h, stripe_h)):
+            k_col = (218, 58, 62) if idx % 2 == 0 else (232, 236, 242)
+            pygame.draw.rect(surf, k_col, (ROAD_LEFT - 12, sy, 10, stripe_h))
+            pygame.draw.rect(surf, k_col, (ROAD_RIGHT + 2, sy, 10, stripe_h))
+
+        # Solid yellow/white outer edge lines
+        pygame.draw.line(surf, (240, 200, 70), (ROAD_LEFT + 3, 0), (ROAD_LEFT + 3, tile_h), 3)
+        pygame.draw.line(surf, (240, 200, 70), (ROAD_RIGHT - 4, 0), (ROAD_RIGHT - 4, tile_h), 3)
+
+        # Dashed white lane dividers between the 4 lanes
+        for lane_i in range(1, NUM_LANES):
+            lx = ROAD_LEFT + LANE_W * lane_i
+            for dy in range(12, tile_h, 60):
+                pygame.draw.rect(surf, (226, 232, 240), (lx - 3, dy, 6, 32), border_radius=2)
+
+        return surf.convert()
+
+    @staticmethod
+    def _bake_headlight_cone() -> pygame.Surface:
+        cone = pygame.Surface((120, 175), pygame.SRCALPHA)
+        for step in range(5):
+            alpha = 30 - step * 5
+            spread = step * 7
+            pygame.draw.polygon(
+                cone,
+                (235, 250, 255, alpha),
+                [
+                    (40, 172),
+                    (18 - spread // 2, 10),
+                    (58 + spread // 2, 10),
+                ],
+            )
+            pygame.draw.polygon(
+                cone,
+                (235, 250, 255, alpha),
+                [
+                    (80, 172),
+                    (62 - spread // 2, 10),
+                    (102 + spread // 2, 10),
+                ],
+            )
+        return cone
+
+    def _spawn_scenery_row(self, y_pos: float) -> None:
+        left_x = random.uniform(35.0, ROAD_LEFT - 48.0)
+        right_x = random.uniform(ROAD_RIGHT + 48.0, GAME_W - 35.0)
+        self.scenery_items.append((left_x, y_pos, random.choice(("TREE", "LAMP", "BUSH"))))
+        self.scenery_items.append((right_x, y_pos, random.choice(("TREE", "LAMP", "BUSH"))))
+
+    def reset(self) -> None:
+        self.player_x: float = float((LANE_CENTERS[1] + LANE_CENTERS[2]) * 0.5)
+        self.player_vx: float = 0.0
+        self.player_heading: float = 0.0
+        self.speed_kmh: float = 155.0
+        self.is_braking: bool = False
+        self.is_nitro: bool = False
+        self.player_blinker: int = 0
+
         self.shields: int = 3
-        self.game_over: bool = False
         self.invuln_timer: float = 0.0
-        self.banner_text: str = "STEER WITH YOUR HAND! PINCH = NITRO!"
-        self.banner_timer: float = 2.6
+        self.shake_timer: float = 0.0
+        self.game_over: bool = False
+        self.score: float = 0.0
+        self.combo: int = 1
+        self.combo_decay_timer: float = 0.0
+        self.distance_m: float = 0.0
 
-        # Car kinematics
-        self.car_x: float = 0.0
-        self.target_car_x: float = 0.0
-        self.car_roll: float = 0.0
-        self.car_y_offset: float = 0.0
-        self.car_vy: float = 0.0
-        self.jump_flip_deg: float = 0.0
-        self.is_jumping: bool = False
-        self.nitro_active: bool = False
-        self.speed_world: float = 11.5
-        self.wheel_spin_deg: float = 0.0
-        self.road_scroll: float = 0.0
+        self.scroll_y: float = 0.0
+        self.scenery_spawn_acc: float = 0.0
+        self.spawn_timer: float = 0.35
 
-        # Entities
-        self.entities: List[RoadEntity] = []
-        self.particles: List[SparkParticle] = []
-        self.spawn_timer: float = 0.55
+        self.traffic: List[TrafficCar] = []
+        self.popups: List[FloatingPopup] = []
+        self.skids: Deque[SkidSegment] = deque(maxlen=90)
+        self.particles: List[SmokePuff] = []
 
-    @property
-    def current_lighting(self) -> LightingPreset:
-        return LIGHTING_PRESETS[self.lighting_index]
+    def player_hitbox(self) -> pygame.Rect:
+        return pygame.Rect(int(self.player_x) - 23, int(PLAYER_Y) - 48, 46, 96)
 
-    @property
-    def render_mode_label(self) -> str:
-        return "WIREFRAME [W]" if self.wireframe_mode else "POLYGON [P]"
+    def _try_spawn_traffic(self) -> None:
+        """Spawn varied vehicles while ALWAYS guaranteeing at least 1 passable lane."""
+        candidate_lanes = list(range(NUM_LANES))
+        random.shuffle(candidate_lanes)
 
-    def trigger_jump(self) -> None:
-        """Launch 3D car into an aerial 360-degree flip over road barriers."""
-        if not self.is_jumping and not self.game_over and not self.garage_mode:
-            self.is_jumping = True
-            self.car_vy = 6.6
-            self.jump_flip_deg = 0.0
-            self.banner_text = "OPTICAL FLOW STUNT JUMP!"
-            self.banner_timer = 1.1
+        # Count how many lanes are currently occupied near the top spawn zone
+        blocked_top = set()
+        for c in self.traffic:
+            if c.y < 190:
+                blocked_top.add(c.lane)
+                blocked_top.add(c.target_lane)
+        if len(blocked_top) >= NUM_LANES - 1:
+            return  # Guarantee at least 1 open corridor at all times!
 
-    def spawn_burst(
-        self, x: float, y: float, z: float, color: Tuple[float, float, float]
-    ) -> None:
-        """Spawn 3D OpenGL spark cubes on crystal pickup or barrier hit."""
-        for _ in range(10):
-            self.particles.append(
-                SparkParticle(
-                    x=x,
-                    y=y,
-                    z=z,
-                    vx=random.uniform(-2.6, 2.6),
-                    vy=random.uniform(1.0, 4.2),
-                    vz=random.uniform(-2.0, 2.5),
-                    color=color,
+        for lane in candidate_lanes:
+            if any(
+                (c.lane == lane or c.target_lane == lane) and c.y < 235
+                for c in self.traffic
+            ):
+                continue
+
+            # Weighted vehicle mix: Trucks prefer outer lanes, Coupes prefer fast lanes!
+            if lane in (0, NUM_LANES - 1):
+                kind = random.choices(
+                    ["SEDAN", "TAXI", "SUV", "TRUCK", "COUPE"],
+                    weights=[30, 18, 22, 18, 12],
+                )[0]
+            else:
+                kind = random.choices(
+                    ["SEDAN", "TAXI", "COUPE", "SUV"],
+                    weights=[32, 20, 30, 18],
+                )[0]
+
+            speed_ranges = {
+                "TRUCK": (88.0, 108.0),
+                "SUV": (105.0, 132.0),
+                "SEDAN": (112.0, 145.0),
+                "TAXI": (115.0, 150.0),
+                "COUPE": (132.0, 168.0),
+            }
+            lo, hi = speed_ranges[kind]
+            spd = random.uniform(lo, hi)
+            col = random.choice(self.sprites.palettes[kind])
+            surf = self.sprites.traffic_surfaces[(kind, col)]
+            aggr = (
+                random.uniform(0.55, 0.95)
+                if kind in ("COUPE", "TAXI")
+                else random.uniform(0.18, 0.55)
+            )
+            if kind == "TRUCK":
+                aggr = random.uniform(0.08, 0.22)
+
+            self.traffic.append(
+                TrafficCar(
+                    kind=kind,
+                    color=col,
+                    surface=surf,
+                    lane=lane,
+                    target_lane=lane,
+                    x=float(LANE_CENTERS[lane]),
+                    y=-surf.get_height(),
+                    base_speed_kmh=spd,
+                    speed_kmh=spd,
+                    aggression=aggr,
+                    decision_timer=random.uniform(0.5, 2.2),
                 )
             )
+            break
 
-    def spawn_wave(self) -> None:
-        """Spawn fair 3-lane highway patterns (always leaves >= 1 clear lane)."""
-        lanes = [0, 1, 2]
-        random.shuffle(lanes)
-        num_barriers = 1 if self.score < 600 else random.choice((1, 2))
-        barrier_lanes = lanes[:num_barriers]
-        free_lanes = lanes[num_barriers:]
+    def _lane_is_clear_for_merge(self, mover: TrafficCar, dest_lane: int) -> bool:
+        """Ensure target lane has room among AI cars & doesn't sideswipe beside player."""
+        for other in self.traffic:
+            if other is mover:
+                continue
+            if other.lane == dest_lane or other.target_lane == dest_lane:
+                min_gap = (mover.height + other.height) * 0.5 + 48.0
+                if abs(other.y - mover.y) < min_gap:
+                    return False
 
-        for b_lane in barrier_lanes:
-            self.entities.append(RoadEntity(kind="BARRIER", lane=b_lane, z=SPAWN_Z))
+        # Never initiate a sudden sideways slam when already directly alongside player;
+        # DO initiate ahead of the player so the player sees the blinker and reacts!
+        dest_x = LANE_CENTERS[dest_lane]
+        if abs(mover.y - PLAYER_Y) < 115.0 and abs(dest_x - self.player_x) < 95.0:
+            return False
+        return True
 
-        if free_lanes and random.random() < 0.80:
-            c_lane = random.choice(free_lanes)
-            self.entities.append(RoadEntity(kind="CRYSTAL", lane=c_lane, z=SPAWN_Z))
+    def _update_traffic_ai(self, dt: float) -> None:
+        """Update traffic following speeds, unpredictable lane decisions & blinkers."""
+        for car in self.traffic:
+            car.is_braking = False
+            ahead_car: Optional[TrafficCar] = None
+            min_dy = 9999.0
+            for other in self.traffic:
+                if other is car:
+                    continue
+                same_corridor = (
+                    other.lane == car.lane or other.target_lane == car.target_lane
+                )
+                dy = car.y - other.y  # `other` is further ahead when `other.y < car.y`
+                if same_corridor and 0.0 < dy < min_dy:
+                    min_dy = dy
+                    ahead_car = other
+
+            desired_spd = car.base_speed_kmh
+            blocked_ahead = False
+            safe_follow_dist = (
+                (car.height + ahead_car.height) * 0.5 + 55.0
+                if ahead_car is not None
+                else 0.0
+            )
+            if ahead_car is not None and min_dy < safe_follow_dist + 75.0:
+                blocked_ahead = True
+                desired_spd = min(desired_spd, max(70.0, ahead_car.speed_kmh - 8.0))
+                if min_dy < safe_follow_dist + 25.0:
+                    car.is_braking = True
+
+            car.speed_kmh += (desired_spd - car.speed_kmh) * min(1.0, 4.5 * dt)
+
+            # State 1: Cruising in lane -> decide unpredictably (or when blocked!) to switch lanes
+            if car.blinker_dir == 0 and not car.is_merging:
+                car.decision_timer -= dt
+                player_approaching = 140.0 < (PLAYER_Y - car.y) < 560.0
+                want_check = car.decision_timer <= 0.0 or blocked_ahead
+                if want_check and -40.0 < car.y < PLAYER_Y - 135.0:
+                    car.decision_timer = random.uniform(1.1, 3.0)
+                    chance = car.aggression * (
+                        1.45 if (blocked_ahead or player_approaching) else 0.65
+                    )
+                    if random.random() < chance:
+                        neighbors = [
+                            nl
+                            for nl in (car.lane - 1, car.lane + 1)
+                            if 0 <= nl < NUM_LANES
+                        ]
+                        random.shuffle(neighbors)
+                        for nl in neighbors:
+                            if self._lane_is_clear_for_merge(car, nl):
+                                car.target_lane = nl
+                                car.blinker_dir = -1 if nl < car.lane else 1
+                                # Signal clearly with flashing indicator BEFORE moving!
+                                car.signal_lead_timer = random.uniform(0.75, 1.05)
+                                break
+
+            # State 2: Flashing Amber Turn Signal before lane change
+            elif car.blinker_dir != 0 and not car.is_merging:
+                car.signal_lead_timer -= dt
+                if not self._lane_is_clear_for_merge(car, car.target_lane):
+                    # Abort safely if another car entered target gap
+                    car.target_lane = car.lane
+                    car.blinker_dir = 0
+                elif car.signal_lead_timer <= 0.0:
+                    car.is_merging = True
+
+            # State 3: Smoothly steering across into `target_lane` with blinker still flashing
+            if car.is_merging:
+                dest_x = float(LANE_CENTERS[car.target_lane])
+                diff_x = dest_x - car.x
+                lateral_speed = (115.0 + 75.0 * car.aggression) * dt
+                if abs(diff_x) <= lateral_speed:
+                    car.x = dest_x
+                    car.lane = car.target_lane
+                    car.is_merging = False
+                    car.blinker_dir = 0
+                    car.heading_deg = 0.0
+                    car.decision_timer = random.uniform(1.8, 3.8)
+                else:
+                    step_x = math.copysign(lateral_speed, diff_x)
+                    car.x += step_x
+                    car.heading_deg += (
+                        math.copysign(11.0, diff_x) - car.heading_deg
+                    ) * min(1.0, 9.0 * dt)
+            else:
+                car.heading_deg += (0.0 - car.heading_deg) * min(1.0, 8.0 * dt)
+
+            # Vertical motion relative to scrolling camera (`player speed - traffic speed`)
+            rel_vy = (self.speed_kmh - car.speed_kmh) * KMH_TO_PX_PER_SEC
+            car.y += rel_vy * dt
 
     def update(
         self,
         dt: float,
-        hands: List[HandGestureData],
-        flow_vel: Tuple[float, float],
-        key_steer: float = 0.0,
-        key_nitro: bool = False,
+        ctrl: GestureControlSnapshot,
+        keys_steer: float,
+        key_brake: bool,
+        key_nitro: bool,
     ) -> None:
-        """Update gesture mapping, car physics, collisions, and particle bursts."""
-        vx, vy = flow_vel
-
-        if self.garage_mode:
-            # Close-up 3D Showroom: Hand moves rotation, finger distance scales car!
-            if hands:
-                hand = hands[0]
-                norm_x = (hand.midpoint_px[0] / float(self.frame_width)) * 2.0 - 1.0
-                norm_y = (hand.midpoint_px[1] / float(self.frame_height)) * 2.0 - 1.0
-                self.garage_rot_y += (norm_x * 95.0 + vx * 3.2) * dt
-                self.garage_rot_x = max(-45.0, min(55.0, 18.0 + norm_y * 35.0))
-                target_scale = max(0.50, min(1.55, hand.distance_px / 95.0))
-                self.garage_scale += (target_scale - self.garage_scale) * min(
-                    1.0, 8.0 * dt
-                )
-            else:
-                self.garage_rot_y = (self.garage_rot_y + 38.0 * dt) % 360.0
-            self.wheel_spin_deg = (self.wheel_spin_deg + 180.0 * dt) % 360.0
-            return
-
-        # Restart race hands-free by pinching when Game Over!
         if self.game_over:
-            if hands and hands[0].is_pinching:
-                self.reset_race()
+            if ctrl.is_nitro:  # Pinch in mid-air to restart hands-free!
+                self.reset()
             return
 
-        # 1. Gesture & Optical-Flow Control Mapping
-        if hands:
-            hand = hands[0]
-            # Comfortable central 56% of webcam width maps across full 3-lane road
-            norm_hand = (hand.midpoint_px[0] / float(self.frame_width) - 0.5) / 0.28
-            norm_hand = max(-1.0, min(1.0, norm_hand))
-            # Fuse MediaPipe pose with Lucas-Kanade horizontal optical flow velocity
-            fused_norm = max(-1.0, min(1.0, norm_hand + vx * 0.012))
-            self.target_car_x = fused_norm * 1.95
-            self.nitro_active = hand.is_pinching or key_nitro
+        # 1. Combine Hand Gestures + Optional Keyboard Controls seamlessly
+        self.is_braking = ctrl.is_braking or key_brake
+        self.is_nitro = (not self.is_braking) and (ctrl.is_nitro or key_nitro)
 
-            # Upward hand flick detected by Lucas-Kanade Optical Flow -> Stunt Jump!
-            if vy < JUMP_FLOW_VY_THRESHOLD:
-                self.trigger_jump()
+        if self.is_braking:
+            target_speed = MIN_SPEED_KMH
+            accel_rate = 3.8
+        elif self.is_nitro:
+            target_speed = NITRO_SPEED_KMH
+            accel_rate = 2.8
         else:
-            self.target_car_x = max(
-                -1.95, min(1.95, self.target_car_x + key_steer * 4.2 * dt)
+            difficulty_cruise = min(40.0, self.distance_m * 0.015)
+            target_speed = CRUISE_SPEED_KMH + difficulty_cruise
+            accel_rate = 1.9
+
+        self.speed_kmh += (target_speed - self.speed_kmh) * min(1.0, accel_rate * dt)
+
+        # Lateral steering
+        min_car_x = float(ROAD_LEFT + 38)
+        max_car_x = float(ROAD_RIGHT - 38)
+        prev_px = self.player_x
+
+        if ctrl.hand_detected and abs(keys_steer) < 0.01:
+            road_mid = (min_car_x + max_car_x) * 0.5
+            road_span = (max_car_x - min_car_x) * 0.5
+            desired_x = road_mid + ctrl.steer_target * road_span
+            self.player_x += (desired_x - self.player_x) * min(1.0, 11.5 * dt)
+        else:
+            self.player_x += keys_steer * 420.0 * dt
+
+        self.player_x = max(min_car_x, min(max_car_x, self.player_x))
+        self.player_vx = (self.player_x - prev_px) / max(dt, 1e-4)
+        self.player_heading += (
+            max(-14.0, min(14.0, self.player_vx * 0.032)) - self.player_heading
+        ) * min(1.0, 12.0 * dt)
+        self.player_blinker = (
+            -1 if self.player_vx < -95.0 else (1 if self.player_vx > 95.0 else 0)
+        )
+
+        # Tire skid marks & smoke when braking hard, flames smoke when Nitro active
+        world_px_s = self.speed_kmh * KMH_TO_PX_PER_SEC
+        for sk in self.skids:
+            sk.y += world_px_s * dt
+        if self.is_braking and self.speed_kmh > 95.0:
+            self.skids.append(SkidSegment(self.player_x - 19, PLAYER_Y + 42))
+            self.skids.append(SkidSegment(self.player_x + 19, PLAYER_Y + 42))
+            if random.random() < 0.55:
+                self.particles.append(
+                    SmokePuff(
+                        self.player_x + random.choice((-20.0, 20.0)),
+                        PLAYER_Y + 48.0,
+                        random.uniform(-18.0, 18.0),
+                        random.uniform(70.0, 130.0),
+                        random.uniform(5.0, 9.0),
+                        (185, 190, 200),
+                    )
+                )
+        elif self.is_nitro and random.random() < 0.75:
+            self.particles.append(
+                SmokePuff(
+                    self.player_x + random.choice((-13.0, 13.0)),
+                    PLAYER_Y + 62.0,
+                    random.uniform(-12.0, 12.0),
+                    random.uniform(140.0, 220.0),
+                    random.uniform(4.0, 7.5),
+                    (80, 225, 255),
+                )
             )
-            self.nitro_active = key_nitro
 
-        if abs(key_steer) > 0.01 and hands:
-            self.target_car_x = max(
-                -1.95, min(1.95, self.target_car_x + key_steer * 4.2 * dt)
-            )
+        # Scroll highway & roadside scenery
+        self.scroll_y = (self.scroll_y + world_px_s * dt) % self.tile_h
+        self.scenery_spawn_acc += world_px_s * dt
+        while self.scenery_spawn_acc >= 95.0:
+            self.scenery_spawn_acc -= 95.0
+            self._spawn_scenery_row(-40.0)
+        self.scenery_items = [
+            (sx, sy + world_px_s * dt, kind)
+            for sx, sy, kind in self.scenery_items
+            if sy + world_px_s * dt < GAME_H + 80
+        ]
 
-        # Smooth steering response & realistic body roll banking
-        prev_x = self.car_x
-        self.car_x += (self.target_car_x - self.car_x) * min(1.0, 10.5 * dt)
-        lat_vel = (self.car_x - prev_x) / max(dt, 1e-4)
-        target_roll = max(-22.0, min(22.0, -lat_vel * 2.6))
-        self.car_roll += (target_roll - self.car_roll) * min(1.0, 12.0 * dt)
+        # Distance & base score
+        meters_step = (self.speed_kmh / 3.6) * dt
+        self.distance_m += meters_step
+        mult = 2 if self.is_nitro else 1
+        self.score += meters_step * 1.4 * mult
+        self.best_score = max(self.best_score, int(self.score))
 
-        # Jump arc & 360-degree aerial barrel flip
-        if self.is_jumping:
-            self.car_y_offset += self.car_vy * dt
-            self.car_vy -= 16.5 * dt
-            self.jump_flip_deg = min(360.0, self.jump_flip_deg + 460.0 * dt)
-            if self.car_y_offset <= 0.0:
-                self.car_y_offset = 0.0
-                self.car_vy = 0.0
-                self.jump_flip_deg = 0.0
-                self.is_jumping = False
-
-        # Dynamic highway speed (ramps up with score + doubles with Pinch Nitro!)
-        difficulty_bonus = min(6.5, self.score / 450.0)
-        base_speed = 11.5 + difficulty_bonus
-        target_speed = base_speed * (1.75 if self.nitro_active else 1.0)
-        self.speed_world += (target_speed - self.speed_world) * min(1.0, 6.0 * dt)
-
-        self.road_scroll = (self.road_scroll + self.speed_world * dt) % 2.4
-        self.wheel_spin_deg = (
-            self.wheel_spin_deg + self.speed_world * 38.0 * dt
-        ) % 360.0
-
-        # Distance points accumulation
-        mult = 2 if self.nitro_active else 1
-        self.score += int(round(self.speed_world * dt * 2.5 * mult))
-        self.best_score = max(self.best_score, self.score)
-
+        if self.combo_decay_timer > 0.0:
+            self.combo_decay_timer -= dt
+            if self.combo_decay_timer <= 0.0:
+                self.combo = 1
         if self.invuln_timer > 0.0:
             self.invuln_timer = max(0.0, self.invuln_timer - dt)
-        if self.banner_timer > 0.0:
-            self.banner_timer = max(0.0, self.banner_timer - dt)
+        if self.shake_timer > 0.0:
+            self.shake_timer = max(0.0, self.shake_timer - dt)
 
-        # 2. Spawn & Move Highway Entities
+        # Spawn & update AI traffic
         self.spawn_timer -= dt
         if self.spawn_timer <= 0.0:
-            self.spawn_wave()
-            self.spawn_timer = max(0.48, 1.15 - min(0.55, self.score / 2200.0))
+            self._try_spawn_traffic()
+            density = max(0.42, 0.92 - min(0.42, self.distance_m * 0.00025))
+            self.spawn_timer = random.uniform(density * 0.8, density * 1.25)
 
-        for ent in self.entities:
-            ent.z += self.speed_world * dt
-            ent.spin = (ent.spin + 150.0 * dt) % 360.0
-            if not ent.active:
-                continue
+        self._update_traffic_ai(dt)
 
-            ent_x = LANE_X[ent.lane]
-            dz = abs(ent.z - CAR_Z)
-            dx = abs(ent_x - self.car_x)
+        # Near-miss overtake rewards & collision handling
+        p_box = self.player_hitbox()
+        for car in self.traffic:
+            c_box = car.hitbox()
+            if p_box.colliderect(c_box):
+                if self.invuln_timer <= 0.0:
+                    self.shields -= 1
+                    self.combo = 1
+                    self.invuln_timer = 1.5
+                    self.shake_timer = 0.30
+                    self.speed_kmh = max(MIN_SPEED_KMH, self.speed_kmh * 0.62)
+                    # Gently push colliding traffic car forward out of overlap
+                    car.y -= 75.0
+                    for _ in range(14):
+                        self.particles.append(
+                            SmokePuff(
+                                (self.player_x + car.x) * 0.5,
+                                (PLAYER_Y + car.y) * 0.5,
+                                random.uniform(-150.0, 150.0),
+                                random.uniform(-120.0, 120.0),
+                                random.uniform(4.0, 8.0),
+                                (255, 195, 65),
+                            )
+                        )
+                    if self.shields <= 0:
+                        self.game_over = True
+                    else:
+                        self.popups.append(
+                            FloatingPopup(
+                                "CRASH! SHIELD -1",
+                                self.player_x,
+                                PLAYER_Y - 70,
+                                (255, 95, 95),
+                            )
+                        )
+            elif (
+                not car.passed_awarded
+                and car.y > PLAYER_Y + 35
+                and abs(car.x - self.player_x) < 108.0
+                and self.speed_kmh > 135.0
+            ):
+                car.passed_awarded = True
+                pts = 100 * self.combo * (2 if self.is_nitro else 1)
+                self.score += pts
+                self.best_score = max(self.best_score, int(self.score))
+                self.combo = min(10, self.combo + 1)
+                self.combo_decay_timer = 3.2
+                self.popups.append(
+                    FloatingPopup(
+                        f"CLOSE OVERTAKE +{pts} (x{self.combo})",
+                        self.player_x,
+                        PLAYER_Y - 68,
+                        (95, 255, 190),
+                    )
+                )
 
-            if dz < 0.82 and dx < 0.82:
-                if ent.kind == "CRYSTAL" and self.car_y_offset < 1.1:
-                    ent.active = False
-                    gained = 100 * self.combo * (2 if self.nitro_active else 1)
-                    self.score += gained
-                    self.best_score = max(self.best_score, self.score)
-                    self.combo = min(8, self.combo + 1)
-                    self.banner_text = f"+{gained} CRYSTAL! COMBO x{self.combo}"
-                    self.banner_timer = 1.0
-                    self.spawn_burst(ent_x, ROAD_Y + 0.5, CAR_Z, (0.15, 1.0, 0.78))
-                elif ent.kind == "BARRIER":
-                    if self.car_y_offset > 0.62:
-                        # Cleared barrier mid-air! Award Optical Flow Stunt Bonus!
-                        ent.active = False
-                        self.score += 250
-                        self.best_score = max(self.best_score, self.score)
-                        self.banner_text = "+250 AIR STUNT CLEAR!"
-                        self.banner_timer = 1.1
-                        self.spawn_burst(ent_x, ROAD_Y + 0.8, CAR_Z, (0.2, 0.9, 1.0))
-                    elif self.invuln_timer <= 0.0:
-                        ent.active = False
-                        self.shields -= 1
-                        self.combo = 1
-                        self.invuln_timer = 1.35
-                        self.spawn_burst(ent_x, ROAD_Y + 0.5, CAR_Z, (1.0, 0.25, 0.3))
-                        if self.shields <= 0:
-                            self.game_over = True
-                            self.banner_text = "GAME OVER! PINCH OR PRESS [R] TO RACE AGAIN"
-                            self.banner_timer = 999.0
-                        else:
-                            self.banner_text = f"SHIELD HIT! {self.shields} LEFT"
-                            self.banner_timer = 1.2
+        self.traffic = [
+            c for c in self.traffic if -260.0 < c.y < GAME_H + 240.0
+        ]
 
-        self.entities = [e for e in self.entities if e.active and e.z < DESPAWN_Z]
+        for pop in self.popups:
+            pop.y -= 42.0 * dt
+            pop.timer -= dt
+        self.popups = [p for p in self.popups if p.timer > 0.0]
 
-        # 3. Update 3D Spark Particles
-        for p in self.particles:
-            p.x += p.vx * dt
-            p.y += p.vy * dt
-            p.z += p.vz * dt
-            p.vy -= 9.5 * dt
-            p.life -= dt
+        for pf in self.particles:
+            pf.x += pf.vx * dt
+            pf.y += pf.vy * dt
+            pf.life -= dt
         self.particles = [p for p in self.particles if p.life > 0.0]
 
     # -----------------------------------------------------------------------
-    # OpenGL Texture Upload & 3D AR Highway Rendering
+    # Pure 2D Top-Down Rendering Pipeline
     # -----------------------------------------------------------------------
-    def upload_webcam_frame(self, frame_bgr: np.ndarray) -> None:
-        h, w = frame_bgr.shape[:2]
-        frame_rgb = np.ascontiguousarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
-        glBindTexture(GL_TEXTURE_2D, self.bg_texture_id)
-        if (w, h) != (self.frame_width, self.frame_height):
-            self.frame_width, self.frame_height = w, h
-            glTexImage2D(
-                GL_TEXTURE_2D, 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, frame_rgb
-            )
-        else:
-            glTexSubImage2D(
-                GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, frame_rgb
-            )
-        glBindTexture(GL_TEXTURE_2D, 0)
+    def render(self, screen: pygame.Surface, ctrl: GestureControlSnapshot, fps: float) -> None:
+        ox = int(random.uniform(-5, 5)) if self.shake_timer > 0.0 else 0
+        oy = int(random.uniform(-5, 5)) if self.shake_timer > 0.0 else 0
 
-    def draw_background_quad(self) -> None:
-        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
-        glDisable(GL_LIGHTING)
-        glDisable(GL_DEPTH_TEST)
-        glEnable(GL_TEXTURE_2D)
-        glBindTexture(GL_TEXTURE_2D, self.bg_texture_id)
-        glColor3f(1.0, 1.0, 1.0)
+        # 1. Seamless scrolling road tiles
+        start_y = int(self.scroll_y) - self.tile_h
+        for ty in range(start_y, GAME_H, self.tile_h):
+            screen.blit(self.road_tile, (ox, ty + oy))
 
-        glMatrixMode(GL_PROJECTION)
-        glPushMatrix()
-        glLoadIdentity()
-        glOrtho(-1.0, 1.0, -1.0, 1.0, -1.0, 1.0)
+        # 2. Roadside trees, bushes & streetlamps
+        for sx, sy, kind in self.scenery_items:
+            ix, iy = int(sx) + ox, int(sy) + oy
+            if kind == "TREE":
+                pygame.draw.circle(screen, (20, 42, 26), (ix + 4, iy + 5), 22)
+                pygame.draw.circle(screen, (42, 112, 56), (ix, iy), 21)
+                pygame.draw.circle(screen, (68, 148, 76), (ix - 5, iy - 5), 12)
+            elif kind == "BUSH":
+                pygame.draw.circle(screen, (36, 96, 48), (ix, iy), 13)
+                pygame.draw.circle(screen, (56, 128, 66), (ix + 6, iy - 2), 9)
+            else:
+                pole_dir = 1 if sx < ROAD_LEFT else -1
+                pygame.draw.circle(screen, (75, 82, 95), (ix, iy), 6)
+                pygame.draw.line(
+                    screen, (125, 135, 150), (ix, iy), (ix + pole_dir * 26, iy), 4
+                )
+                pygame.draw.circle(
+                    screen, (255, 240, 185), (ix + pole_dir * 26, iy), 6
+                )
 
-        glMatrixMode(GL_MODELVIEW)
-        glPushMatrix()
-        glLoadIdentity()
-
-        glBegin(GL_QUADS)
-        glTexCoord2f(0.0, 1.0)
-        glVertex2f(-1.0, -1.0)
-        glTexCoord2f(1.0, 1.0)
-        glVertex2f(1.0, -1.0)
-        glTexCoord2f(1.0, 0.0)
-        glVertex2f(1.0, 1.0)
-        glTexCoord2f(0.0, 0.0)
-        glVertex2f(-1.0, 1.0)
-        glEnd()
-
-        glPopMatrix()
-        glMatrixMode(GL_PROJECTION)
-        glPopMatrix()
-        glMatrixMode(GL_MODELVIEW)
-
-        glBindTexture(GL_TEXTURE_2D, 0)
-        glDisable(GL_TEXTURE_2D)
-
-    def apply_lighting_state(self) -> None:
-        preset = self.current_lighting
-        if not preset.enabled:
-            glDisable(GL_LIGHTING)
-            glDisable(GL_LIGHT0)
-            return
-
-        glEnable(GL_LIGHTING)
-        glEnable(GL_LIGHT0)
-        glEnable(GL_COLOR_MATERIAL)
-        glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
-
-        glLightfv(GL_LIGHT0, GL_POSITION, preset.position)
-        glLightfv(GL_LIGHT0, GL_AMBIENT, preset.ambient)
-        glLightfv(GL_LIGHT0, GL_DIFFUSE, preset.diffuse)
-        glLightfv(GL_LIGHT0, GL_SPECULAR, preset.specular)
-        glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, preset.specular)
-        glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, preset.shininess)
-
-    def draw_cyber_highway(self) -> None:
-        """Render semi-transparent AR 3D highway deck + animated glowing lane markers."""
-        glDisable(GL_LIGHTING)
-
-        # Translucent dark cyber asphalt deck so real webcam floor subtly shines through
-        glBegin(GL_QUADS)
-        glColor4f(0.06, 0.08, 0.14, 0.72)
-        glVertex3f(-ROAD_HALF_WIDTH, ROAD_Y, DESPAWN_Z)
-        glVertex3f( ROAD_HALF_WIDTH, ROAD_Y, DESPAWN_Z)
-        glColor4f(0.04, 0.12, 0.22, 0.42)
-        glVertex3f( ROAD_HALF_WIDTH, ROAD_Y, SPAWN_Z)
-        glVertex3f(-ROAD_HALF_WIDTH, ROAD_Y, SPAWN_Z)
-        glEnd()
-
-        # Glowing neon cyan/magenta guardrails
-        glLineWidth(3.0)
-        glBegin(GL_LINES)
-        rail_col = (0.15, 1.0, 0.90) if self.nitro_active else (0.20, 0.78, 1.0)
-        glColor3fv(rail_col)
-        for side_x in (-ROAD_HALF_WIDTH, ROAD_HALF_WIDTH):
-            glVertex3f(side_x, ROAD_Y + 0.02, DESPAWN_Z)
-            glVertex3f(side_x, ROAD_Y + 0.02, SPAWN_Z)
-        glEnd()
-        glLineWidth(2.2)
-
-        # Scrolling lane divider dashes
-        glBegin(GL_QUADS)
-        glColor4f(0.85, 0.95, 1.0, 0.85)
-        for divider_x in (-0.82, 0.82):
-            z_cursor = SPAWN_Z + self.road_scroll
-            while z_cursor < DESPAWN_Z:
-                z_end = min(DESPAWN_Z, z_cursor + 1.1)
-                glVertex3f(divider_x - 0.04, ROAD_Y + 0.015, z_end)
-                glVertex3f(divider_x + 0.04, ROAD_Y + 0.015, z_end)
-                glVertex3f(divider_x + 0.04, ROAD_Y + 0.015, z_cursor)
-                glVertex3f(divider_x - 0.04, ROAD_Y + 0.015, z_cursor)
-                z_cursor += 2.4
-        glEnd()
-
-        self.apply_lighting_state()
-
-    def render_scene(self) -> None:
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-        self.draw_background_quad()
-
-        glClear(GL_DEPTH_BUFFER_BIT)
-        glEnable(GL_DEPTH_TEST)
-
-        glMatrixMode(GL_PROJECTION)
-        glLoadIdentity()
-        gluPerspective(FOV_DEGREES, WINDOW_WIDTH / float(WINDOW_HEIGHT), 0.1, 60.0)
-
-        glMatrixMode(GL_MODELVIEW)
-        glLoadIdentity()
-        self.apply_lighting_state()
-
-        glPolygonMode(
-            GL_FRONT_AND_BACK, GL_LINE if self.wireframe_mode else GL_FILL
-        )
-
-        if self.garage_mode:
-            # Close-Up AR Garage Mode (Docked on Right Side away from user's face!)
-            glPushMatrix()
-            glTranslatef(1.45, -0.05, -5.4)
-            glScalef(self.garage_scale, self.garage_scale, self.garage_scale)
-            glRotatef(self.garage_rot_x, 1.0, 0.0, 0.0)
-            glRotatef(self.garage_rot_y, 0.0, 1.0, 0.0)
-            draw_sports_car(self.wheel_spin_deg, nitro_active=True)
-            glPopMatrix()
-        else:
-            # 3D AR Highway Race Mode
-            self.draw_cyber_highway()
-
-            # Obstacles & Energy Crystals
-            for ent in self.entities:
-                glPushMatrix()
-                glTranslatef(LANE_X[ent.lane], ROAD_Y, ent.z)
-                if ent.kind == "CRYSTAL":
-                    glTranslatef(0.0, 0.52, 0.0)
-                    draw_energy_crystal(ent.spin)
-                else:
-                    draw_hazard_barrier()
-                glPopMatrix()
-
-            # Player 3D Sports Car (flashes briefly while invulnerable)
-            blink_skip = (
-                self.invuln_timer > 0.0
-                and int(self.invuln_timer * 14.0) % 2 == 1
-            )
-            if not blink_skip:
-                glPushMatrix()
-                glTranslatef(self.car_x, ROAD_Y + self.car_y_offset, CAR_Z)
-                if self.nitro_active:
-                    glScalef(1.04, 0.94, 1.12)  # Aero speed stance stretch
-                glRotatef(self.car_roll, 0.0, 0.0, 1.0)
-                glRotatef(-self.car_roll * 0.45, 0.0, 1.0, 0.0)
-                if self.is_jumping:
-                    glRotatef(-self.jump_flip_deg, 1.0, 0.0, 0.0)
-                draw_sports_car(self.wheel_spin_deg, self.nitro_active)
-                glPopMatrix()
-
-            # 3D Spark Bursts
-            for p in self.particles:
-                glPushMatrix()
-                glTranslatef(p.x, p.y, p.z)
-                draw_unit_box(0.06, 0.06, 0.06, p.color)
-                glPopMatrix()
-
-        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
-
-    def close(self) -> None:
-        if self.bg_texture_id:
-            glDeleteTextures([int(self.bg_texture_id)])
-            self.bg_texture_id = 0
-
-
-# ---------------------------------------------------------------------------
-# HUD Telemetry Overlay
-# ---------------------------------------------------------------------------
-def draw_game_hud(
-    frame_bgr: np.ndarray,
-    engine: AeroDriveEngine,
-    hands: List[HandGestureData],
-    flow_tracker: LucasKanadeFlowTracker,
-    fps: float,
-) -> None:
-    """Render arcade race telemetry, shield hearts, steering bar & Unit 5 status."""
-    frame_h, frame_w = frame_bgr.shape[:2]
-    overlay = frame_bgr.copy()
-
-    cv2.rectangle(overlay, (0, 0), (frame_w, 66), (14, 18, 26), cv2.FILLED)
-    cv2.rectangle(
-        overlay, (0, frame_h - 30), (frame_w, frame_h), (14, 18, 26), cv2.FILLED
-    )
-    cv2.addWeighted(overlay, 0.80, frame_bgr, 0.20, 0, frame_bgr)
-    cv2.line(frame_bgr, (0, 66), (frame_w, 66), (70, 205, 255), 1, cv2.LINE_AA)
-
-    if engine.garage_mode:
-        cv2.putText(
-            frame_bgr,
-            f"GARAGE INSPECT [G]  |  Scale: {engine.garage_scale:.2f}x  |  {engine.render_mode_label}",
-            (12, 24),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.49,
-            (95, 230, 255),
-            2,
-            cv2.LINE_AA,
-        )
-        cv2.putText(
-            frame_bgr,
-            f"Spread Fingers = Scale Car  |  Move Hand = Rotate  |  Light [L]: {engine.current_lighting.name}",
-            (12, 50),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.41,
-            (225, 235, 245),
-            1,
-            cv2.LINE_AA,
-        )
-    else:
-        speed_kmh = int(round(engine.speed_world * 14.0))
-        shields_str = "O " * engine.shields + "- " * (3 - engine.shields)
-        nitro_tag = "NITRO ON!" if engine.nitro_active else "Pinch=Nitro"
-
-        cv2.putText(
-            frame_bgr,
-            f"SCORE: {engine.score:05d} (x{engine.combo})  |  {speed_kmh} km/h  |  Shields: {shields_str}",
-            (12, 24),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.49,
-            (100, 255, 195) if engine.nitro_active else (95, 225, 255),
-            2,
-            cv2.LINE_AA,
-        )
-        cv2.putText(
-            frame_bgr,
-            f"{nitro_tag}  |  LK Flow: {flow_tracker.speed_px:4.1f} px/f (Flick Up=Jump)  |  FPS: {fps:4.0f}",
-            (12, 50),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.41,
-            (235, 240, 245),
-            1,
-            cv2.LINE_AA,
-        )
-
-        # Live compact Steering Gauge centered right above the bottom bar
-        bar_x1, bar_x2, bar_y = frame_w // 2 - 85, frame_w // 2 + 85, frame_h - 44
-        cv2.rectangle(
-            frame_bgr, (bar_x1, bar_y), (bar_x2, bar_y + 8), (40, 50, 68), cv2.FILLED
-        )
-        cv2.rectangle(
-            frame_bgr, (bar_x1, bar_y), (bar_x2, bar_y + 8), (90, 180, 240), 1
-        )
-        steer_norm = max(0.0, min(1.0, (engine.car_x / 1.95 + 1.0) * 0.5))
-        knob_x = int(round(bar_x1 + steer_norm * (bar_x2 - bar_x1)))
-        cv2.circle(frame_bgr, (knob_x, bar_y + 4), 6, (0, 255, 180), cv2.FILLED)
-
-        # Center event callout banner (Combo / Stunt / Game Over)
-        if engine.banner_timer > 0.0:
-            (tw, th), _ = cv2.getTextSize(
-                engine.banner_text, cv2.FONT_HERSHEY_SIMPLEX, 0.58, 2
-            )
-            bx = max(10, (frame_w - tw) // 2)
-            by = 98
-            cv2.rectangle(
-                frame_bgr,
-                (bx - 10, by - th - 7),
-                (bx + tw + 10, by + 8),
-                (18, 22, 32),
-                cv2.FILLED,
-            )
-            border_c = (70, 90, 255) if engine.game_over else (0, 240, 175)
-            cv2.rectangle(
-                frame_bgr,
-                (bx - 10, by - th - 7),
-                (bx + tw + 10, by + 8),
-                border_c,
-                2,
-                cv2.LINE_AA,
-            )
-            cv2.putText(
-                frame_bgr,
-                engine.banner_text,
-                (bx, by),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.58,
-                (255, 255, 255),
-                2,
-                cv2.LINE_AA,
+        # 3. Tire brake skid segments on asphalt
+        for sk in self.skids:
+            pygame.draw.rect(
+                screen, (24, 26, 30), (int(sk.x) - 3 + ox, int(sk.y) + oy, 6, 14)
             )
 
-    # Hand detection hint badge if no hand is visible
-    if not hands and not engine.game_over:
-        cv2.putText(
-            frame_bgr,
-            "Raise 1 Hand to Steer (or use Left/Right Arrows)",
-            (145, frame_h - 54),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.44,
-            (140, 230, 255),
-            1,
-            cv2.LINE_AA,
+        blink_on = (int(time.perf_counter() * 7.5) % 2) == 0
+
+        # 4. AI Traffic Cars + Flashing Amber Turn Indicators + Brake Lamps
+        for car in self.traffic:
+            surf = (
+                pygame.transform.rotozoom(car.surface, -car.heading_deg, 1.0)
+                if abs(car.heading_deg) > 0.6
+                else car.surface
+            )
+            rect = surf.get_rect(center=(int(car.x) + ox, int(car.y) + oy))
+            screen.blit(surf, rect)
+
+            half_w = car.width // 2 - 6
+            half_h = car.height // 2 - 5
+            cx, cy = int(car.x) + ox, int(car.y) + oy
+
+            # Red brake lights when slowing down behind another vehicle
+            if car.is_braking:
+                for side in (-1, 1):
+                    pygame.draw.circle(
+                        screen, (255, 42, 55), (cx + side * (half_w - 6), cy + half_h), 6
+                    )
+
+            # High-visibility flashing AMBER TURN SIGNAL INDICATORS + lane-merge arrow!
+            if car.blinker_dir != 0 and blink_on:
+                bx = cx + car.blinker_dir * half_w
+                for by in (cy - half_h + 3, cy + half_h - 3):
+                    pygame.draw.circle(screen, (255, 196, 25), (bx, by), 8)
+                    pygame.draw.circle(screen, (255, 250, 200), (bx, by), 4)
+                # Crisp amber chevron beside the vehicle so lane switches read instantly
+                tip_x = bx + car.blinker_dir * 18
+                pygame.draw.polygon(
+                    screen,
+                    (255, 185, 20),
+                    [(tip_x, cy), (bx + car.blinker_dir * 6, cy - 9), (bx + car.blinker_dir * 6, cy + 9)],
+                )
+
+        # 5. Smoke & spark particles
+        for pf in self.particles:
+            pygame.draw.circle(
+                screen,
+                pf.color,
+                (int(pf.x) + ox, int(pf.y) + oy),
+                max(2, int(pf.radius * (pf.life / 0.42))),
+            )
+
+        # 6. Player Hero Supercar + Headlights + Brake Glow + Nitro Flames
+        px, py = int(self.player_x) + ox, int(PLAYER_Y) + oy
+        screen.blit(self.headlight_cone, (px - 60, py - 215))
+
+        if self.is_nitro:
+            flick = random.randint(24, 42)
+            for fx in (-14, 14):
+                pygame.draw.polygon(
+                    screen,
+                    (40, 215, 255),
+                    [(px + fx - 7, py + 54), (px + fx + 7, py + 54), (px + fx, py + 54 + flick)],
+                )
+                pygame.draw.polygon(
+                    screen,
+                    (230, 255, 255),
+                    [(px + fx - 4, py + 54), (px + fx + 4, py + 54), (px + fx, py + 54 + flick // 2)],
+                )
+
+        blink_hide = self.invuln_timer > 0.0 and (int(self.invuln_timer * 15) % 2 == 1)
+        if not blink_hide:
+            p_surf = self.sprites.get_rotated_player(self.player_heading)
+            screen.blit(p_surf, p_surf.get_rect(center=(px, py)))
+
+            if self.is_braking:
+                for sx_off in (-18, 18):
+                    pygame.draw.circle(screen, (255, 38, 52), (px + sx_off, py + 53), 9)
+                    pygame.draw.circle(screen, (255, 205, 205), (px + sx_off, py + 53), 4)
+
+            if self.player_blinker != 0 and blink_on:
+                bx = px + self.player_blinker * 26
+                pygame.draw.circle(screen, (255, 195, 25), (bx, py - 50), 6)
+                pygame.draw.circle(screen, (255, 195, 25), (bx, py + 50), 6)
+
+        # 7. Floating Near-Miss / Crash popups
+        for pop in self.popups:
+            lbl = self.font_small.render(pop.text, True, pop.color)
+            bg = lbl.get_rect(center=(int(pop.x), int(pop.y))).inflate(12, 6)
+            pygame.draw.rect(screen, (15, 20, 30), bg, border_radius=6)
+            screen.blit(lbl, lbl.get_rect(center=bg.center))
+
+        # 8. Crisp Arcade Top Dashboard & Bottom Gesture Telemetry Bar
+        self._draw_dashboard(screen, ctrl, fps)
+
+    def _draw_dashboard(
+        self, screen: pygame.Surface, ctrl: GestureControlSnapshot, fps: float
+    ) -> None:
+        header = pygame.Surface((GAME_W, 74), pygame.SRCALPHA)
+        header.fill((14, 18, 28, 222))
+        screen.blit(header, (0, 0))
+        pygame.draw.line(screen, (55, 195, 255), (0, 74), (GAME_W, 74), 2)
+
+        # Speedometer + Pedal Badge
+        spd_col = (
+            (255, 95, 105)
+            if self.is_braking
+            else ((90, 255, 205) if self.is_nitro else (255, 255, 255))
+        )
+        spd_txt = self.font_hud.render(f"SPEED: {int(self.speed_kmh):3d} km/h", True, spd_col)
+        screen.blit(spd_txt, (18, 12))
+
+        pedal_str = (
+            "PEDAL: BRAKING [FIST]"
+            if self.is_braking
+            else ("PEDAL: NITRO BOOST [PINCH]" if self.is_nitro else "PEDAL: CRUISE [OPEN HAND]")
+        )
+        screen.blit(self.font_small.render(pedal_str, True, spd_col), (18, 43))
+
+        # Score, Distance & Combo
+        score_txt = self.font_hud.render(
+            f"SCORE: {int(self.score):06d}  (x{self.combo})", True, (110, 230, 255)
+        )
+        screen.blit(score_txt, (320, 12))
+        dist_txt = self.font_small.render(
+            f"BEST: {self.best_score:06d}   |   DIST: {self.distance_m / 1000.0:.2f} km   |   {int(fps):2d} FPS",
+            True,
+            (190, 210, 230),
+        )
+        screen.blit(dist_txt, (320, 43))
+
+        # Shield integrity bars on top-right
+        for i in range(3):
+            col = (45, 235, 155) if i < self.shields else (55, 62, 75)
+            pygame.draw.rect(screen, col, (GAME_W - 148 + i * 44, 18, 36, 16), border_radius=4)
+        screen.blit(
+            self.font_small.render("ARMOR", True, (185, 205, 225)),
+            (GAME_W - 148, 42),
         )
 
-    cv2.putText(
-        frame_bgr,
-        f"[W/P] {engine.render_mode_label}  [L] Light  [G] Garage Scale  [F] Flow  [R] Restart  [Q] Quit",
-        (10, frame_h - 9),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.37,
-        (175, 210, 240),
-        1,
-        cv2.LINE_AA,
-    )
+        # Footer controls bar
+        footer = pygame.Surface((GAME_W, 30), pygame.SRCALPHA)
+        footer.fill((14, 18, 28, 220))
+        screen.blit(footer, (0, GAME_H - 30))
+        ctrl_line = (
+            "Hand Left/Right: Steer  |  Close Fist: BRAKE  |  Pinch: NITRO  |  "
+            "[C] Cam Window  [R] Restart  [Q] Quit"
+        )
+        screen.blit(self.font_small.render(ctrl_line, True, (175, 215, 245)), (16, GAME_H - 23))
+
+        # Game Over overlay card
+        if self.game_over:
+            card = pygame.Surface((520, 185), pygame.SRCALPHA)
+            card.fill((14, 18, 30, 238))
+            cx, cy = GAME_W // 2 - 260, GAME_H // 2 - 92
+            screen.blit(card, (cx, cy))
+            pygame.draw.rect(screen, (255, 85, 105), (cx, cy, 520, 185), 3, border_radius=12)
+
+            t1 = self.font_big.render("TRAFFIC WRECKED!", True, (255, 95, 110))
+            t2 = self.font_hud.render(
+                f"Final Score: {int(self.score):06d}   |   Best: {self.best_score:06d}",
+                True,
+                (240, 245, 255),
+            )
+            t3 = self.font_small.render(
+                "PINCH THUMB + INDEX or press [R] to Race Again!",
+                True,
+                (95, 255, 195),
+            )
+            screen.blit(t1, t1.get_rect(center=(GAME_W // 2, cy + 50)))
+            screen.blit(t2, t2.get_rect(center=(GAME_W // 2, cy + 102)))
+            screen.blit(t3, t3.get_rect(center=(GAME_W // 2, cy + 146)))
 
 
 # ---------------------------------------------------------------------------
 # Main Application Entry Point
 # ---------------------------------------------------------------------------
 def main() -> None:
-    print("[AeroDrive 3D] Initializing AR Hand-Gesture & Optical-Flow Car Game...")
-    cap = open_webcam(0)
-    pose_tracker = HandPoseTracker(
-        max_num_hands=1,
-        min_detection_confidence=0.6,
-        min_tracking_confidence=0.6,
-    )
-    flow_tracker = LucasKanadeFlowTracker(trail_length=14)
-
+    print("[AeroDrive 2D] Launching 60 FPS Top-Down Traffic Racer + Async Gesture Worker...")
     pygame.init()
     pygame.display.set_caption(
-        "AeroDrive 3D - AR Hand-Gesture & Optical-Flow Car Game ([W] Wire | [P] Poly | [L] Light | [G] Garage)"
+        "AeroDrive 2D - Top-Down Hand-Gesture Highway Traffic Racer"
     )
-    pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT), DOUBLEBUF | OPENGL)
+    screen = pygame.display.set_mode((GAME_W, GAME_H))
+    clock = pygame.time.Clock()
 
-    engine = AeroDriveEngine(DEFAULT_FRAME_WIDTH, DEFAULT_FRAME_HEIGHT)
-    show_flow_trails = True
-    prev_time = time.perf_counter()
-    fps = 0.0
+    sprites = VehicleSpriteBank()
+    game = TopDownTrafficGame(sprites)
+    vision = AsyncVisionWorker(camera_index=0)
 
-    print("[AeroDrive 3D] Ready to Race!")
-    print("  * Move Hand Left / Right : Steer 3D Sports Car")
-    print("  * Pinch Thumb + Index    : NITRO TURBO BOOST (2x Speed & Score)!")
-    print("  * Quick Hand Flick UP    : Lucas-Kanade Optical Flow STUNT JUMP!")
-    print("  * [G] Garage Inspect     : Pinch/Spread to Scale & Rotate 3D Car")
-    print("  * [W] Wireframe | [P] Polygon | [L] Lighting | [R] Restart | [Q] Quit")
+    if vision.init_error:
+        print(f"[Warning] Webcam unavailable ({vision.init_error}). Running in Keyboard Mode.")
+
+    show_cam_window = vision.init_error is None
+    cam_window_positioned = False
+    last_cam_seq = -1
 
     running = True
     try:
         while running:
-            now = time.perf_counter()
-            dt = min(now - prev_time, 0.08)
-            inst_fps = 1.0 / max(now - prev_time, 1e-6)
-            fps = 0.85 * fps + 0.15 * inst_fps if fps > 0 else inst_fps
-            prev_time = now
+            dt = min(clock.tick(TARGET_FPS) / 1000.0, 0.05)
+            fps = clock.get_fps() or 60.0
 
             for event in pygame.event.get():
-                if event.type == QUIT:
+                if event.type == pygame.QUIT:
                     running = False
-                elif event.type == KEYDOWN:
+                elif event.type == pygame.KEYDOWN:
                     if event.key in (pygame.K_ESCAPE, pygame.K_q):
                         running = False
-                    elif event.key == pygame.K_w:
-                        engine.wireframe_mode = True
-                    elif event.key == pygame.K_p:
-                        engine.wireframe_mode = False
-                    elif event.key == pygame.K_l:
-                        engine.lighting_index = (engine.lighting_index + 1) % len(
-                            LIGHTING_PRESETS
-                        )
-                    elif event.key == pygame.K_g:
-                        engine.garage_mode = not engine.garage_mode
-                    elif event.key == pygame.K_f:
-                        show_flow_trails = not show_flow_trails
                     elif event.key == pygame.K_r:
-                        engine.reset_race()
-                    elif event.key in (pygame.K_SPACE, pygame.K_UP):
-                        engine.trigger_jump()
+                        game.reset()
+                    elif event.key == pygame.K_c and vision.init_error is None:
+                        show_cam_window = not show_cam_window
+                        if not show_cam_window:
+                            cv2.destroyWindow(CAM_WINDOW_TITLE)
+                            cam_window_positioned = False
 
             pressed = pygame.key.get_pressed()
-            key_steer = float(pressed[pygame.K_RIGHT]) - float(pressed[pygame.K_LEFT])
-            key_nitro = bool(pressed[pygame.K_n])
+            keys_steer = float(pressed[pygame.K_RIGHT] or pressed[pygame.K_d]) - float(
+                pressed[pygame.K_LEFT] or pressed[pygame.K_a]
+            )
+            key_brake = bool(
+                pressed[pygame.K_DOWN] or pressed[pygame.K_s] or pressed[pygame.K_SPACE]
+            )
+            key_nitro = bool(
+                pressed[pygame.K_UP] or pressed[pygame.K_w] or pressed[pygame.K_n]
+            )
 
-            success, raw_frame = cap.read()
-            hands: List[HandGestureData] = []
-            flow_vel = (0.0, 0.0)
+            ctrl_snap, cam_frame, seq = vision.get_latest()
 
-            if success:
-                raw_frame = cv2.flip(raw_frame, 1)
-                # Run MediaPipe pose estimation & Lucas-Kanade optical flow on clean camera pixels
-                hands = pose_tracker.process(
-                    raw_frame,
-                    pinch_threshold_px=DEFAULT_PINCH_THRESHOLD_PX,
-                    draw_skeleton=False,
-                )
-                flow_vel = flow_tracker.update(raw_frame, hands)
+            # Update companion OpenCV gesture monitor window only when a new camera frame arrives
+            if show_cam_window and cam_frame is not None and seq != last_cam_seq:
+                last_cam_seq = seq
+                cv2.imshow(CAM_WINDOW_TITLE, cam_frame)
+                if not cam_window_positioned:
+                    cv2.moveWindow(CAM_WINDOW_TITLE, 930, 65)
+                    cam_window_positioned = True
+                key_cv = cv2.waitKey(1) & 0xFF
+                if key_cv in (ord("q"), ord("Q"), 27):
+                    running = False
 
-            engine.update(dt, hands, flow_vel, key_steer=key_steer, key_nitro=key_nitro)
-
-            if success:
-                display_frame = raw_frame
-                draw_game_hud(display_frame, engine, hands, flow_tracker, fps)
-                if show_flow_trails:
-                    flow_tracker.draw_trails(display_frame)
-                pose_tracker.draw_landmarks_on_frame(display_frame)
-                for hand in hands:
-                    draw_pinch_overlay(display_frame, hand)
-                engine.upload_webcam_frame(display_frame)
-
-            engine.render_scene()
+            game.update(dt, ctrl_snap, keys_steer, key_brake, key_nitro)
+            game.render(screen, ctrl_snap, fps)
             pygame.display.flip()
     finally:
-        engine.close()
-        pose_tracker.close()
-        cap.release()
+        vision.stop()
+        cv2.destroyAllWindows()
         pygame.quit()
-        print("[AeroDrive 3D] Cleanly shut down.")
+        print("[AeroDrive 2D] Cleanly shut down.")
 
 
 if __name__ == "__main__":
