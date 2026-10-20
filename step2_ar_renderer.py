@@ -29,6 +29,7 @@ import pygame
 from OpenGL.GL import (
     GL_AMBIENT,
     GL_AMBIENT_AND_DIFFUSE,
+    GL_BLEND,
     GL_COLOR_BUFFER_BIT,
     GL_COLOR_MATERIAL,
     GL_DEPTH_BUFFER_BIT,
@@ -41,10 +42,12 @@ from OpenGL.GL import (
     GL_LIGHTING,
     GL_LINE,
     GL_LINE_SMOOTH,
+    GL_LINE_SMOOTH_HINT,
     GL_LINEAR,
     GL_MODELVIEW,
     GL_NICEST,
     GL_NORMALIZE,
+    GL_ONE_MINUS_SRC_ALPHA,
     GL_POSITION,
     GL_PROJECTION,
     GL_QUADS,
@@ -52,6 +55,7 @@ from OpenGL.GL import (
     GL_SHININESS,
     GL_SMOOTH,
     GL_SPECULAR,
+    GL_SRC_ALPHA,
     GL_TEXTURE_2D,
     GL_TEXTURE_MAG_FILTER,
     GL_TEXTURE_MIN_FILTER,
@@ -60,6 +64,7 @@ from OpenGL.GL import (
     GL_UNSIGNED_BYTE,
     glBegin,
     glBindTexture,
+    glBlendFunc,
     glClear,
     glClearDepth,
     glColor3f,
@@ -266,13 +271,15 @@ class AeroTouchRenderer:
         glDepthFunc(GL_LEQUAL)
         glShadeModel(GL_SMOOTH)
         glEnable(GL_NORMALIZE)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         glEnable(GL_LINE_SMOOTH)
-        glHint(GL_LINE_SMOOTH, GL_NICEST)
-        glLineWidth(2.4)
+        glHint(GL_LINE_SMOOTH_HINT, GL_NICEST)
+        glLineWidth(2.2)
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
 
         # Allocate persistent GPU 2D texture for webcam background frames
-        self.bg_texture_id = glGenTextures(1)
+        self.bg_texture_id = int(glGenTextures(1))
         glBindTexture(GL_TEXTURE_2D, self.bg_texture_id)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
@@ -419,7 +426,7 @@ class AeroTouchRenderer:
     def close(self) -> None:
         """Delete allocated GPU texture cleanly."""
         if self.bg_texture_id:
-            glDeleteTextures([self.bg_texture_id])
+            glDeleteTextures([int(self.bg_texture_id)])
             self.bg_texture_id = 0
 
 
