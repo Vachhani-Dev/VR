@@ -606,13 +606,13 @@ def main() -> None:
             # Smooth continuous movement with Arrow Keys
             pressed = pygame.key.get_pressed()
             move_speed = 2.2 * dt
-            if pressed[K_LEFT]:
+            if pressed[pygame.K_LEFT]:
                 renderer.nudge_position(-move_speed, 0.0)
-            if pressed[K_RIGHT]:
+            if pressed[pygame.K_RIGHT]:
                 renderer.nudge_position(move_speed, 0.0)
-            if pressed[K_UP]:
+            if pressed[pygame.K_UP]:
                 renderer.nudge_position(0.0, move_speed)
-            if pressed[K_DOWN]:
+            if pressed[pygame.K_DOWN]:
                 renderer.nudge_position(0.0, -move_speed)
 
             # 2. Capture Webcam Frame + Track Hand Pose
