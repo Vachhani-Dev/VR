@@ -1,54 +1,44 @@
-# AeroTouch 3D
+# AeroTouch 3D — AeroDrive 3D Edition
 
-**Vision-Based Augmented Reality, Optical Flow Tracking, 3D OpenGL Rendering & Sensor Fusion**  
+**Vision-Based AR Hand-Gesture & Optical-Flow 3D OpenGL Car Game + Sensor Fusion**  
 *University Coursework Project — Unit 5 (Vision-Based AR, Tracking, Optical Flow, Rendering) & Unit 6 (Sensor Fusion, Simulink)*
 
 ---
 
 ## Project Roadmap
 
-- [x] **Step 1: Hand Tracking & Background Setup (Unit 5 — Pose Estimation)** (`step1_hand_tracking.py`)
-  - Real-time webcam capture (`640x480` mirrored AR view) with OpenCV (`cv2`).
-  - 21-point 2D/2.5D hand pose estimation with MediaPipe (`mediapipe.tasks` v1.x + legacy fallback) with offline `models/hand_landmarker.task` bundle.
-  - Euclidean pixel distance calculation $d = \sqrt{(x_8 - x_4)^2 + (y_8 - y_4)^2}$ between **Thumb Tip (`4`)** and **Index Finger Tip (`8`)** for **Pinch Gesture Detection**.
-- [x] **Step 2: 3D Rendering Engine (Unit 5 — Rendering Techniques)** (`step2_ar_renderer.py`)
-  - Real-time GPU 2D background texture streaming (`GL_TEXTURE_2D` + `glTexSubImage2D`) via `pygame` (`pygame-ce`) & `PyOpenGL`.
-  - Perspective 3D **Cube** & **Square Pyramid** (`[S]` toggle) floating in the center of the AR camera view with outward surface normals & depth testing (`GL_DEPTH_TEST`).
-  - Real-time rasterizer & shading controls: **`[W]`** Wireframe (`GL_LINE`), **`[P]`** Solid Polygon (`GL_FILL`), and **`[L]`** Dynamic Lighting Presets (`Studio Phong`, `Cyber Cyan`, `Sunset Warm Rim`, `Unlit Flat OFF`).
-- [ ] **Step 3: Gesture Integration & Optical Flow (Unit 5 — Tracking)** *(Awaiting Step 2 verification)*
-- [ ] **Unit 6: Sensor Fusion & Simulink Integration** *(Upcoming)*
+- [x] **Step 1: Hand Tracking & Pinch Detection (`step1_hand_tracking.py`)**
+  - Real-time webcam capture (`640x480` mirrored AR view) + 21-landmark MediaPipe hand pose estimation + offline `models/hand_landmarker.task` bundle + Euclidean pinch detection.
+- [x] **Step 2: 3D Rendering Engine (`step2_ar_renderer.py`)**
+  - Live OpenGL `GL_TEXTURE_2D` camera background + side-docked 3D **Cube** & **Pyramid** + **`[W]`** Wireframe, **`[P]`** Solid Polygon, **`[L]`** 4-Preset Phong Lighting, and **`[D]` / Arrow** positioning.
+- [x] **Step 3: AeroDrive 3D — Hand-Gesture & Optical-Flow Car Game (`step3_car_game.py`)**
+  - Playable 3D OpenGL AR Highway Racer directly over your live webcam feed (keeping your face & upper body completely clear!).
+  - **Hand Pose Steering:** Move hand Left / Right to steer & roll-bank a multi-part 3D Sports Car (chassis, cabin, spoiler, spinning 3D wheels, headlights & Nitro flames).
+  - **Pinch Gesture (`Thumb [4]` ↔ `Index [8]`):** Activates **NITRO TURBO BOOST** (2x speed, 2x score multiplier & twin 3D exhaust flames) — and hands-free race restart on Game Over!
+  - **Pyramidal Lucas-Kanade Optical Flow (`cv2.calcOpticalFlowPyrLK`):** Draws glowing neon motion trails + velocity arrows on your hand AND launches your car into a **360° Stunt Flip Jump** over road barriers on a quick upward flick!
+  - **`[G]` Garage Showroom Mode:** Close-up 3D inspection mode where finger spread distance **scales** and hand motion **rotates** the 3D car (with live **`[W]`**, **`[P]`**, **`[L]`** toggles).
+- [ ] **Step 4 (Unit 6): Kalman Sensor Fusion & MATLAB/Simulink Telemetry Module** *(Up next!)*
 
 ---
 
-## Quick Start
-
-### Install All Dependencies
+## Quick Start — Play AeroDrive 3D!
 
 ```powershell
-python -m pip install opencv-python mediapipe pygame-ce PyOpenGL
-```
-*(Or `python -m pip install -r requirements.txt`)*
-
-### Run Step 1 (Hand Pose & Pinch Detection)
-
-```powershell
-python step1_hand_tracking.py
+git pull origin arena/8b9cd07c-vr
+python step3_car_game.py
 ```
 
-### Run Step 2 (OpenGL 3D AR Rendering Engine)
+### Gesture & Keyboard Controls (`step3_car_game.py`)
 
-```powershell
-python step2_ar_renderer.py
-```
-
-### Step 2 Keyboard Controls
-
-| Key | Rendering Technique / Action |
+| Gesture / Key | Action |
 | :--- | :--- |
-| **`W`** | Switch to **Wireframe Rendering** (`glPolygonMode(..., GL_LINE)`) |
-| **`P`** | Switch to **Polygon / Solid Rendering** (`glPolygonMode(..., GL_FILL)`) |
-| **`L`** | Cycle **OpenGL Lighting Modes** (`Studio Key`, `Cyber Neon`, `Sunset Rim`, `Unlit Flat OFF`) |
-| **`S`** | Switch 3D Geometry between **Cube** and **Pyramid** |
-| **`SPACE`** | Pause / Resume 3D auto-rotation |
-| **`H`** | Show / Hide 2D hand landmark skeleton overlay |
-| **`Q`** or **`ESC`** | Quit the application cleanly |
+| **Move Hand Left / Right** | Smoothly steer & tilt your 3D OpenGL Sports Car across the 3 lanes |
+| **Pinch (`Thumb + Index`)** | Activate **NITRO BOOST** (2x Speed + 2x Score + 3D Flames) / Restart on Game Over |
+| **Quick Flick Hand UP** | **Lucas-Kanade Optical Flow Stunt Jump** (360° flip over barriers for `+250` bonus!) |
+| **`G`** | Toggle **Garage Inspect Mode** (spread fingers to **Scale**, move hand to **Rotate** 3D Car) |
+| **`W` / `P`** | Switch **Wireframe (`GL_LINE`)** vs **Solid Polygon (`GL_FILL`)** rendering |
+| **`L`** | Cycle **4 OpenGL Lighting Modes** (`Studio Key`, `Cyber Neon`, `Sunset Rim`, `Unlit Flat`) |
+| **`F`** | Toggle **Lucas-Kanade Optical Flow** motion vector trails |
+| **`R`** | Restart race anytime |
+| **`Left/Right` / `Space` / `N`** | Optional keyboard steering, jump & Nitro controls |
+| **`Q` or `ESC`** | Quit cleanly |
