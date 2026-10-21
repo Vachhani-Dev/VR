@@ -38,15 +38,16 @@ import threading
 import time
 from typing import Deque, Dict, List, Optional, Tuple
 
-# Position the main 2D game window neatly on the left so the companion camera
-# monitor window sits right beside it on screen without overlapping!
-os.environ.setdefault("SDL_VIDEO_WINDOW_POS", "50,45")
-
+import runtime_bootstrap  # noqa: F401
 import cv2
 import numpy as np
 import pygame
 
 from step1_hand_tracking import HandGestureData, HandPoseTracker, open_webcam
+
+# Position the main 2D game window neatly on the left so the companion camera
+# monitor window sits right beside it on screen without overlapping!
+os.environ.setdefault("SDL_VIDEO_WINDOW_POS", "50,45")
 
 # ---------------------------------------------------------------------------
 # Display & Highway Layout Constants
